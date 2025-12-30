@@ -17,7 +17,7 @@ library(patchwork)
 # 1. DADOS
 # ==============================================================================
 
-arquivo <- "~/Documentos/IPEA/modelos/demografia social da ditadura militar/censos interpolados.xlsx"
+arquivo <- "nome da pasta onde vocÊ salvou o arquivo/censos interpolados.xlsx"
 
 df_raw <- read_excel(
   path = arquivo,
