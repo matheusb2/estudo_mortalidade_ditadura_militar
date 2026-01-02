@@ -1,3 +1,5 @@
+
+
 # ==============================================================================
 # 0. PACOTES
 # ==============================================================================
@@ -16,9 +18,10 @@ library(patchwork)
 # ==============================================================================
 # 1. DADOS
 # ==============================================================================
+#ATENÇÃO,SUBSTITUA ABAIXO COM O ENDEREÇO ONDE SALVOU A PLANILHA E IRÁ SALVAR A TABELA DE RESULTADOS
 
-arquivo <- "pasta onde a planilha está salva/censos interpolados.xlsx"
-arquivo_saida <- "local onde será salvo o resultado/análise coortes/estudo_coorte.csv"
+arquivo <- "pasta onde salvou a planilha/censos interpolados.xlsx"
+arquivo_saida <- "pasta onde será salvo a tabela de resultados/análise coortes/estudo_coorte.csv"
 
 df_raw <- read_excel(
   path = arquivo,
@@ -694,6 +697,7 @@ tabela_componentes <- tibble(
 
 print(tabela_componentes)
 
+
 write_csv(tabela_componentes, 
           file = arquivo_saida)
 
@@ -800,26 +804,6 @@ ggplot(dados_long_disp, aes(x = documentadas, y = excesso)) +
   scale_x_continuous(labels = scales::comma) +
   scale_y_continuous(labels = scales::comma)
 
-#séries temporais
-ggplot(dados_violencia_plot, aes(x = ano, y = mortes, color = serie)) +
-  geom_line(linewidth = 1) +
-  geom_point(
-    data = subset(dados_violencia_plot, tipo == "Documentadas"),
-    size = 2,
-    color = "black"
-  ) +
-  facet_wrap(~ tipo, scales = "free_y") +
-  labs(
-    title = "Comparação entre mortes documentadas e estimativas de excesso",
-    subtitle = "Homicídios e mortes violentas segundo diferentes tendências (1964–1985)",
-    x = "Ano",
-    y = "Número de mortes",
-    color = "Série"
-  ) +
-  theme_ipea() +
-  scale_color_ipea(palette = "Orange-Blue") +
-  scale_y_continuous(labels = scales::comma)
-
 #===================================================================
 #11. TRIANGULAÇÃO DE DÉFICIT DEMOGRÁFICO E MORTES VIOLENTAS
 #===================================================================
@@ -917,7 +901,7 @@ ggplot(triang, aes(x = homic_excesso_t3, y = deficit_demografico)) +
   ) +
   theme_ipea()
 
-#visualização: mortes documentadas => déficit populacional
+#visualização: mortes documentadas => déficit populacional; controle pelo ano
 
 tempdef <- lm(deficit_demografico ~ ano, data = triang)
 triang$residuos_ano <- tempdef$residuals
@@ -939,7 +923,7 @@ ggplot(triang, aes(x = documentadas, y = residuos_ano)) +
   theme_ipea() + scale_color_ipea() +
   geom_text(x = Inf, y = -Inf, label = txtdocdef, color="black", size=5, hjust=1.1, vjust=-1.1)
 
- 
+
 #visualização: mortes violentas 1=> déficit populacional
 
 ggplot(triang, aes(x = viol_excesso_t1, y = deficit_demografico)) +
@@ -1001,8 +985,14 @@ triang <- df_raw |>
       `déficit populacional mulheres 50 a 59 anos`,
     
     documentadas = `mortos e desaparecidos documentados`,
-    homic_excesso = `homicídios excesso (projetado - tendência1)`,
-    viol_excesso  = `excesso de mortes violentas (projetado - tendência 1)`
+    homic_excesso1 = `homicídios excesso (projetado - tendência1)`,
+    homic_excesso2 = `homicídios excesso (projetado - tendência2)`,
+    homic_excesso3 = `homicídios excesso (projetado - tendência3)`,
+    viol_excesso1  = `excesso de mortes violentas (projetado - tendência 1)`,
+    viol_excesso2  = `excesso de mortes violentas (projetado - tendência 2)`,
+    viol_excesso3  = `excesso de mortes violentas (projetado - tendência 3)`
+    
+    
   )
 
 triang_long <- triang |>
@@ -1015,7 +1005,7 @@ triang_long <- triang |>
   mutate(valor_z = as.numeric(scale(valor))) |>
   ungroup()
 
-grafico_sincronia_temporal <- ggplot(triang_long, aes(x = ano, y = valor_z, color = serie)) +
+ggplot(triang_long, aes(x = ano, y = valor_z, color = serie)) +
   geom_line(linewidth = 1.1) +
   geom_vline(xintercept = c(1964, 1985), linetype = "dashed") +
   labs(
@@ -1029,20 +1019,45 @@ grafico_sincronia_temporal <- ggplot(triang_long, aes(x = ano, y = valor_z, colo
   theme_ipea()
 
 #===============================================================================
-#TRIANGULAÇÃO COM TAXAS
+#dados defasados
 #===============================================================================
 
 #lags
 
-triang_lag <- triang |>
-       arrange(ano) |>
-       mutate(
-         homic_excesso_lag1 = lag(homic_excesso, 1),
-             homic_excesso_lag2 = lag(homic_excesso, 2)
-         )
- 
-summary(lm(deficit_demografico ~ homic_excesso + homic_excesso_lag1 + homic_excesso_lag2, data = triang_lag))
+names(triang)
 
+triang_lag <- triang |>
+  arrange(ano) |>
+  mutate(
+    homic_excesso1_lag1 = lag(homic_excesso1, 1),
+    homic_excesso1_lag2 = lag(homic_excesso1, 2)
+  )
+
+summary(lm(deficit_demografico ~ homic_excesso1 + homic_excesso1_lag1 + homic_excesso1_lag2, data = triang_lag))
+
+
+#lags
+
+triang_lag <- triang |>
+  arrange(ano) |>
+  mutate(
+    homic_excesso2_lag1 = lag(homic_excesso2, 1),
+    homic_excesso2_lag2 = lag(homic_excesso2, 2)
+  )
+
+summary(lm(deficit_demografico ~ homic_excesso2 + homic_excesso2_lag1 + homic_excesso2_lag2, data = triang_lag))
+
+
+#lags
+
+triang_lag <- triang |>
+  arrange(ano) |>
+  mutate(
+    homic_excesso3_lag1 = lag(homic_excesso3, 1),
+    homic_excesso3_lag2 = lag(homic_excesso3, 2)
+  )
+
+summary(lm(deficit_demografico ~ homic_excesso3 + homic_excesso3_lag1 + homic_excesso3_lag2, data = triang_lag))
 #==============================================================================
 #Gráfico de triangulação entre défict demográfico e excessos de mortes violentas
 #==============================================================================
@@ -1051,12 +1066,12 @@ summary(lm(deficit_demografico ~ homic_excesso + homic_excesso_lag1 + homic_exce
 triang_long_disp <- triang |>
   select(
     deficit_demografico,
-    homic_excesso_t1,
-    homic_excesso_t2,
-    homic_excesso_t3,
-    viol_excesso_t1,
-    viol_excesso_t2,
-    viol_excesso_t3
+    homic_excesso1,
+    homic_excesso2,
+    homic_excesso3,
+    viol_excesso1,
+    viol_excesso2,
+    viol_excesso3
   ) |>
   pivot_longer(
     -deficit_demografico,
@@ -1107,7 +1122,7 @@ labels_eq_triang <- labels_eq_triang |>
 
 #GRÁFICO FINAL (síntese, 6 em 1)
 ggplot(triang_long_disp, aes(x = excesso, y = deficit_demografico)) +
-  geom_point(alpha = 0.7, size = 2, shape = 5) +
+  geom_point(alpha = 0.7, size = 2, shape = 3) +
   geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
   geom_text(
     data = labels_eq_triang,
@@ -1322,11 +1337,24 @@ triang_migracao <- triang |>
 
 summary(
   lm(
-    deficit_demografico ~ saldo_migratorio_ano + homic_excesso + ano,
+    deficit_demografico ~ saldo_migratorio_ano + homic_excesso1 + ano,
     data = triang_migracao
   )
 )
 
+summary(
+  lm(
+    deficit_demografico ~ saldo_migratorio_ano + homic_excesso2 + ano,
+    data = triang_migracao
+  )
+)
+
+summary(
+  lm(
+    deficit_demografico ~ saldo_migratorio_ano + homic_excesso3 + ano,
+    data = triang_migracao
+  )
+)
 
 #visualização
 
@@ -1338,7 +1366,7 @@ summary(defic_migra)
 intercept_defmig <- coef(defic_migra)[["(Intercept)"]]
 slope_defmig <- coef(defic_migra)[[2]]
 txt_lm_dm <- sprintf('y = %.2f + %.2fx, r² = %.2f', intercept_defmig, slope_defmig, 
-                                    summary(defic_migra)$r.squared)
+                     summary(defic_migra)$r.squared)
 ggplot(triang_migracao, aes(x = saldo_migratorio_ano, y = residuos)) +
   geom_point() +
   geom_smooth(method = "lm", se = T, formula = y ~x, show.legend = T) +
