@@ -718,7 +718,7 @@ modelo_placebo <- lm(deficit ~ sexo * regime + ano, data = adultos_placebo)
 summary(modelo_placebo)
 
 # ==============================================================================
-# 5. MORTALIDADE NA INFÂNCIA (5–9) — ESTIMÁVEL (MÉTODO CORRIGIDO)
+# 5. MORTALIDADE NA INFÂNCIA (5–9) — ESTIMÁVEL
 # ==============================================================================
 
 # Dados de fecundidade (mantido igual)
@@ -948,6 +948,7 @@ defict_infant <- ggplot(mortes_infancia, aes(x = ano, y = deficit)) +
   theme_ipea()
 
 defict_infant
+
 save_ipeaplot(
   defict_infant,
   "deficit_infantil_5_9_regime_ajustado",
@@ -1108,7 +1109,7 @@ jovens_15_24 <- jovens_15_24 |>
 jovens_15_24 <- jovens_15_24 |>
   mutate(regime_f = factor(regime, labels = c("Fora do regime", "Durante o regime")))
 
-ggplot(jovens_15_24, aes(x = ano, y = deficit)) +
+plotjovem <- ggplot(jovens_15_24, aes(x = ano, y = deficit)) +
   geom_point(alpha = 0.5) +
   geom_smooth(
     aes(color = regime_f, group = regime_f),
@@ -1125,7 +1126,9 @@ ggplot(jovens_15_24, aes(x = ano, y = deficit)) +
     color = "Período"
   ) +
   theme_ipea()
+plotjovem
 
+save_ipeaplot(plotjovem, "déficit de jovens no regime autoritário", format = c("eps", "png"))
 
 # ==============================================================================
 # 7. MORTALIDADE EM IDOSOS (60+)
@@ -1232,7 +1235,7 @@ summary(lm(deficit ~ ano, data = placebo_idosos))
 idosos_60mais <- idosos_60mais |>
   mutate(regime_f = factor(regime, labels = c("Fora do regime", "Durante o regime")))
 
-ggplot(idosos_60mais, aes(x = ano, y = deficit)) +
+plotidoso <- ggplot(idosos_60mais, aes(x = ano, y = deficit)) +
   geom_point(alpha = 0.5) +
   geom_smooth(
     aes(color = regime_f, group = regime_f),
@@ -1249,6 +1252,9 @@ ggplot(idosos_60mais, aes(x = ano, y = deficit)) +
     color = "Período"
   ) +
   theme_ipea()
+plotidoso
+
+save_ipeaplot(plotidoso, "déficit idosos e regime", format = c("png", "eps"))
 
 # ==============================================================================
 # 8. INTERVALOS FINAIS
@@ -1267,16 +1273,15 @@ limite_superior <- excesso_15_24_total +
 
 tabela_componentes <- tibble(
   Componente = c(
-    "Mortes documentadas",
     'Excesso jovens (15-24)',
     "Excesso adultos (25–59)",
     "Excesso infância (5–9)",
     "Excesso idosos (60+)",
     "TOTAL"
   ),
-  Inferior = c(mortes_documentadas, excesso_15_24_masc_total, mortes_adultos_homens, 0, 0, limite_inferior),
-  Central  = c(mortes_documentadas, excesso_15_24_total, mortes_adultos_total_valor, 0, 0, estimativa_central),
-  Superior = c(mortes_documentadas, excesso_15_24_total, mortes_adultos_total_valor,
+  Inferior = c(excesso_15_24_masc_total, mortes_adultos_homens, 0, 0, limite_inferior),
+  Central  = c(excesso_15_24_total, mortes_adultos_total_valor, 0, 0, estimativa_central),
+  Superior = c(excesso_15_24_total, mortes_adultos_total_valor,
                excesso_mortalidade_infancia, excesso_idosos_total, limite_superior)
 ) |>
   mutate(across(-Componente, ~ comma(round(.x))))
@@ -1315,19 +1320,6 @@ summary(lm(viol_t2 ~ documentadas, data = dados_disp))
 summary(lm(viol_t3 ~ documentadas, data = dados_disp))
 
 #Enfim, o gráfico
-ggplot(dados_long_disp, aes(x = documentadas, y = excesso)) +
-  geom_point(alpha = 0.7) +
-  geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
-  facet_wrap(~ cenario, scales = "free_y") +
-  labs(
-    title = "Associação entre mortes documentadas e estimativas de excesso",
-    subtitle = "Homicídios e mortes violentas – diferentes tendências (1964–1985)",
-    x = "Mortes documentadas (por ano)",
-    y = "Excesso estimado de mortes"
-  ) +
-  theme_ipea() +
-  scale_x_continuous(labels = scales::comma) +
-  scale_y_continuous(labels = scales::comma)
 
 labels_eq <- dados_long_disp |>
   group_by(cenario) |>
@@ -1368,7 +1360,8 @@ posicoes <- dados_long_disp |>
 labels_eq <- labels_eq |>
   left_join(posicoes, by = "cenario")
 
-ggplot(dados_long_disp, aes(x = documentadas, y = excesso)) +
+
+vitimas_oficiais_excesso_mortes <- ggplot(dados_long_disp, aes(x = documentadas, y = excesso)) +
   geom_point(alpha = 0.7, size = 2, shape = 4) +
   geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
   geom_text(
@@ -1389,6 +1382,11 @@ ggplot(dados_long_disp, aes(x = documentadas, y = excesso)) +
   theme_ipea() +
   scale_x_continuous(labels = scales::comma) +
   scale_y_continuous(labels = scales::comma)
+
+vitimas_oficiais_excesso_mortes
+
+save_ipeaplot(vitimas_oficiais_excesso_mortes, "vítimas oficiais e excesso de mortes violentas",
+             format = c("eps", "png"))
 
 #===================================================================
 #11. TRIANGULAÇÃO DE DÉFICIT DEMOGRÁFICO E MORTES VIOLENTAS
@@ -1591,7 +1589,7 @@ triang_long <- triang |>
   mutate(valor_z = as.numeric(scale(valor))) |>
   ungroup()
 
-ggplot(triang_long, aes(x = ano, y = valor_z, color = serie)) +
+triangulacao_temporal <- ggplot(triang_long, aes(x = ano, y = valor_z, color = serie)) +
   geom_line(linewidth = 1.1) +
   geom_vline(xintercept = c(1964, 1985), linetype = "dashed") +
   labs(
@@ -1603,7 +1601,8 @@ ggplot(triang_long, aes(x = ano, y = valor_z, color = serie)) +
   ) +
   scale_color_ipea(palette = "Orange-Blue") +
   theme_ipea()
-
+triangulacao_temporal
+save_ipeaplot(triangulacao_temporal, "triangulação temporal", format = c("eps", "png"))
 #===============================================================================
 #dados defasados
 #===============================================================================
@@ -1707,7 +1706,8 @@ labels_eq_triang <- labels_eq_triang |>
   left_join(posicoes_triang, by = "cenario")
 
 #GRÁFICO FINAL (síntese, 6 em 1)
-ggplot(triang_long_disp, aes(x = excesso, y = deficit_demografico)) +
+
+mortes_violentas_defict_populacional <- ggplot(triang_long_disp, aes(x = excesso, y = deficit_demografico)) +
   geom_point(alpha = 0.7, size = 2, shape = 3) +
   geom_smooth(method = "lm", se = FALSE, linewidth = 1) +
   geom_text(
@@ -1728,6 +1728,11 @@ ggplot(triang_long_disp, aes(x = excesso, y = deficit_demografico)) +
   theme_ipea() +
   scale_x_continuous(labels = scales::comma) +
   scale_y_continuous(labels = scales::comma)
+
+mortes_violentas_defict_populacional
+
+save_ipeaplot(mortes_violentas_defict_populacional, "mortes violentas e déficit populacional",
+              format = c("eps", "png"))
 
 #==============================================================================
 #EXPLICAÇÃO ALTERNATIVA: A MIGRAÇÃO
@@ -1910,14 +1915,20 @@ intercept_defmig <- coef(defic_migra)[["(Intercept)"]]
 slope_defmig <- coef(defic_migra)[[2]]
 txt_lm_dm <- sprintf('y = %.2f + %.2fx, r² = %.2f', intercept_defmig, slope_defmig, 
                      summary(defic_migra)$r.squared)
-ggplot(triang_migracao, aes(x = saldo_migratorio_ano, y = residuos)) +
+
+
+migra_control_ano <- ggplot(triang_migracao, aes(x = saldo_migratorio_ano, y = residuos)) +
   geom_point() +
   geom_smooth(method = "lm", se = T, formula = y ~x, show.legend = T) +
   labs(title = "Déficit populacional controlado por ano e saldo migratório",
-       x = "ano", y = "saldo migratório controlado por ano") +
+       x = "saldo migratório", y = "deficit demográfico controlado por ano") +
   theme_ipea() + scale_color_ipea() +
   geom_text(x = Inf, y = -Inf, label = txt_lm_dm, color="black", size=5, hjust=1.1, vjust=-1.1)
 
+migra_control_ano
+
+save_ipeaplot(migra_control_ano, "efeito de saldo migratório controledo por ano",
+              format = c("png", "eps"))
 
 #==============================================================
 #ESTUDO DE COORTE
