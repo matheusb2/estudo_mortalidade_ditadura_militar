@@ -28,50 +28,6 @@ library(patchwork)
 
 
 
-#Fonte: Adas, Melhem.Panorama geográfico brasileiro. São Paulo: Moderna, 2004, p. 286.
-migracao_participacao <- tibble::tribble(
-  ~periodo,        ~percentual,
-  "1808–1890",      8.0,
-  "1891–1900",     29.0,
-  "1901–1920",      7.1,
-  "1921–1940",      8.1,
-  "1941–1950",      1.0,
-  "1951–1960",      3.4,
-  "1961–1970",      0.9
-)
-
-#LEVY, M. S. F.. O papel da migração internacional na evolução da população brasileira (1872 a 1972). Revista de Saúde Pública, v. 8, p. 49–90, jun. 1974. https://doi.org/10.1590/S0034-89101974000500003 
-entradas_imigrantes_decada <- tibble::tribble(
-  ~periodo,        ~imigrantes, ~percentual_total,
-  "1872–1879",      176337,       3.10,
-  "1880–1889",      448622,       7.66,
-  "1890–1899",     1198327,      20.47,
-  "1900–1909",      622407,      10.63,
-  "1910–1919",      815453,      13.93,
-  "1920–1929",      846647,      14.46,
-  "1930–1939",      332768,       5.68,
-  "1940–1949",      114085,       1.94,
-  "1950–1959",      583068,       9.95,
-  "1960–1969",      197587,       3.37,
-  "1970–2004",      520877,       8.80
-)
-
-#IBGE. Estatísticas históricas do Brasil. Séries econômicas, Demográficas e Sociais de 1550 a 1985. V. 3, p. 28-33, 1986.
-pop_imigrante_censos <- tibble::tribble(
-  ~ano, ~pop_total,   ~pop_imigrante, ~percentual,
-  1872, 10112061,       389459,         3.85,
-  1890, 14333915,       351618,         2.45,
-  1900, 17318565,      1074311,         6.20,
-  1920, 30635605,      1565961,         5.11,
-  1940, 41236315,      1406342,         3.41,
-  1950, 51944397,      1213974,         2.33,
-  1960, 70992343,      1400245,         1.97,
-  1970, 93134846,      1229128,         1.32,
-  1980,119011052,      1110910,         0.93,
-  1991,146825475,       767773,         0.52,
-  2000,169590693,       683982,         0.40
-)
-
 
 arquivo <- "~/Documentos/IPEA/modelos/demografia social da ditadura militar/censos interpolados.xlsx" #Exemplo
 
@@ -307,6 +263,11 @@ contrafactual_exponencial <- function(
   
   resultado
 }
+
+# identificar colunas contrafactuais de população
+cols_contrafactual <- names(df_raw) |>
+  stringr::str_subset("^contrafactual (homens|mulheres|crianças)")
+
 
 #sensibilidade
 anos_finais_cf <- c(1980, 1991, 2000, 2010)
@@ -730,7 +691,6 @@ fecundidade_decada <- tibble::tribble(
   2000, 2.38, 2010, 1.90,
   2022, 1.55
 )
-
 # Interpolação anual da TFT (mantido igual)
 fecundidade_ano <- tibble(
   ano = seq(
@@ -747,6 +707,17 @@ fecundidade_ano <- tibble(
       rule = 2
     )$y
   )
+# Média de fecundidade no período de nascimento da coorte 5–9
+fecundidade_coorte_5_9 <- fecundidade_ano |>
+  mutate(
+    ano_obs = ano + 7  # centro aproximado da coorte
+  ) |>
+  group_by(ano_obs) |>
+  summarise(
+    tft_media_coorte = mean(tft, na.rm = TRUE),
+    .groups = "drop"
+  )
+summary(fecundidade_coorte_5_9)
 
 # ==============================================================================
 # MÉTODO 2 SIMPLIFICADO: AJUSTE PELA DIFERENÇA ENTRE TFT REAL E TFT IMPLÍCITA
@@ -876,19 +847,7 @@ dados_5_9_aj <- df_raw |>
       `contrafactual mulheres 5 a 9 anos` - `mulheres 5 a 9 anos`
   )
 
-# 5. Análise de sensibilidade: comparar com método antigo
-sensibilidade_fecundidade <- dados_5_9_aj |>
-  select(ano, fator_fecundidade_5_9) |>
-  # Comparar com método antigo se disponível
-  left_join(
-    fecundidade_coorte_5_9 |> select(ano_obs, fator_antigo = fator_fecundidade_5_9),
-    by = c("ano" = "ano_obs")
-  ) |>
-  filter(!is.na(fator_antigo)) |>
-  mutate(diferenca = fator_fecundidade_5_9 - fator_antigo)
 
-cat("\nComparação com método anterior:\n")
-print(sensibilidade_fecundidade)
 
 # 6. Continuar com análise de mortalidade (igual ao seu código original)
 infancia_5_9 <- dados_5_9_aj |>
@@ -1393,30 +1352,49 @@ save_ipeaplot(vitimas_oficiais_excesso_mortes, "vítimas oficiais e excesso de m
 #===================================================================
 
 #ORGANIZAR OS DADOS
+
 triang <- df_raw |>
   filter(ano >= 1964, ano <= 1985) |>
   transmute(
     ano,
-    deficit_demografico =
+
+    # estoque agregado
+    deficit_estoque =
       `déficit populacional homens 15 a 19 anos` +
       `déficit populacional mulheres 15 a 19 anos` +
       `déficit populacional homens 25 a 29 anos` +
+      `déficit populacional mulheres 25 a 29 anos` +
       `déficit populacional homens 30 a 39 anos` +
-      `déficit populacional homens 40 a 49 anos` +
-      `déficit populacional homens 50 a 59 anos`,
-    
+      `déficit populacional mulheres 30 a 39 anos`,
+
     documentadas = `mortos e desaparecidos documentados`,
-    
     homic_excesso_t1 = `homicídios excesso (projetado - tendência1)`,
     homic_excesso_t2 = `homicídios excesso (projetado - tendência2)`,
     homic_excesso_t3 = `homicídios excesso (projetado - tendência3)`,
-    
-    viol_excesso_t1 = `excesso de mortes violentas (projetado - tendência 1)`,
-    viol_excesso_t2 = `excesso de mortes violentas (projetado - tendência 2)`,
-    viol_excesso_t3 = `excesso de mortes violentas (projetado - tendência 3)`
+    viol_excesso_t1  = `excesso de mortes violentas (projetado - tendência 1)`,
+    viol_excesso_t2  = `excesso de mortes violentas (projetado - tendência 2)`,
+    viol_excesso_t3  = `excesso de mortes violentas (projetado - tendência 3)`
+  ) |>
+  arrange(ano) |>
+  mutate(
+    deficit_demografico =
+      pmax(deficit_estoque - lag(deficit_estoque), 0)
   )
 
 #regressões trianguladas
+
+summary(lm(deficit_demografico ~ homic_excesso_t1, data = triang))
+summary(lm(deficit_demografico ~ homic_excesso_t2, data = triang))
+
+summary(lm(deficit_demografico ~ homic_excesso_t3, data = triang))
+
+summary(lm(deficit_demografico ~ viol_excesso_t1, data = triang))
+
+summary(lm(deficit_demografico ~ viol_excesso_t2, data = triang))
+
+summary(lm(deficit_demografico ~ viol_excesso_t3, data = triang))
+
+summary(lm(deficit_demografico ~ documentadas, data = triang))
 
 summary(lm(deficit_demografico ~ homic_excesso_t1 + ano, data = triang))
 
@@ -1429,20 +1407,6 @@ summary(lm(deficit_demografico ~ viol_excesso_t1 + ano, data = triang))
 summary(lm(deficit_demografico ~ viol_excesso_t2 + ano, data = triang))
 
 summary(lm(deficit_demografico ~ viol_excesso_t3 + ano, data = triang))
-
-summary(lm(deficit_demografico ~ documentadas +  ano, data = triang))
-
-summary(lm(deficit_demografico ~ documentadas + homic_excesso_t1 + ano, data = triang))
-
-summary(lm(deficit_demografico ~ documentadas + homic_excesso_t2 + ano, data = triang))
-
-summary(lm(deficit_demografico ~ documentadas + homic_excesso_t3 + ano, data = triang))
-
-summary(lm(deficit_demografico ~ documentadas + viol_excesso_t1 + ano, data = triang))
-
-summary(lm(deficit_demografico ~ documentadas + viol_excesso_t2 + ano, data = triang))
-
-summary(lm(deficit_demografico ~ documentadas + viol_excesso_t3 + ano, data = triang))
 
 
 
@@ -1485,29 +1449,6 @@ ggplot(triang, aes(x = homic_excesso_t3, y = deficit_demografico)) +
   ) +
   theme_ipea()
 
-#visualização: mortes documentadas => déficit populacional; controle pelo ano
-
-tempdef <- lm(deficit_demografico ~ ano, data = triang)
-triang$residuos_ano <- tempdef$residuals
-docdef <- lm(residuos_ano ~ documentadas, data = triang)
-intercep_docdef <- coef(docdef)[["(Intercept)"]]
-slope_docdef <- coef(docdef)[[2]]
-txtdocdef <- sprintf('y = %.2f + %.2fx, r² = %.2f', intercep_docdef, slope_docdef, 
-                     summary(docdef)$r.squared)
-
-ggplot(triang, aes(x = documentadas, y = residuos_ano)) +
-  geom_point(size = 2, alpha = 0.7) +
-  geom_smooth(method = "lm", se = T, linewidth = 1) +
-  labs(
-    title = "mortos e desaparecidos e déficit demográfico, controlado por trajetória temporal",
-    subtitle = "Brasil, 1964–1985",
-    x = "mortos e desaparecidos políticos documentados",
-    y = "Déficit populacional implícito controlado por ano"
-  ) +
-  theme_ipea() + scale_color_ipea() +
-  geom_text(x = Inf, y = -Inf, label = txtdocdef, color="black", size=5, hjust=1.1, vjust=-1.1)
-
-
 #visualização: mortes violentas 1=> déficit populacional
 
 ggplot(triang, aes(x = viol_excesso_t1, y = deficit_demografico)) +
@@ -1547,102 +1488,6 @@ ggplot(triang, aes(x = viol_excesso_t3, y = deficit_demografico)) +
   ) +
   theme_ipea()
 
-
-#Sincronia: magnitudes diferentes, tendências convergentes?
-
-triang <- df_raw |>
-  filter(ano >= 1964, ano <= 1985) |>
-  transmute(
-    ano,
-    
-    # Déficit demográfico implícito (jovens + adultos)
-    deficit_demografico =
-      `déficit populacional homens 15 a 19 anos` +
-      `déficit populacional mulheres 15 a 19 anos` +
-      `déficit populacional homens 25 a 29 anos` +
-      `déficit populacional mulheres 25 a 29 anos` +
-      `déficit populacional homens 30 a 39 anos` +
-      `déficit populacional mulheres 30 a 39 anos` +
-      `déficit populacional homens 40 a 49 anos` +
-      `déficit populacional mulheres 40 a 49 anos` +
-      `déficit populacional homens 50 a 59 anos` +
-      `déficit populacional mulheres 50 a 59 anos`,
-    
-    documentadas = `mortos e desaparecidos documentados`,
-    homic_excesso1 = `homicídios excesso (projetado - tendência1)`,
-    homic_excesso2 = `homicídios excesso (projetado - tendência2)`,
-    homic_excesso3 = `homicídios excesso (projetado - tendência3)`,
-    viol_excesso1  = `excesso de mortes violentas (projetado - tendência 1)`,
-    viol_excesso2  = `excesso de mortes violentas (projetado - tendência 2)`,
-    viol_excesso3  = `excesso de mortes violentas (projetado - tendência 3)`
-    
-    
-  )
-
-triang_long <- triang |>
-  pivot_longer(
-    -ano,
-    names_to = "serie",
-    values_to = "valor"
-  ) |>
-  group_by(serie) |>
-  mutate(valor_z = as.numeric(scale(valor))) |>
-  ungroup()
-
-triangulacao_temporal <- ggplot(triang_long, aes(x = ano, y = valor_z, color = serie)) +
-  geom_line(linewidth = 1.1) +
-  geom_vline(xintercept = c(1964, 1985), linetype = "dashed") +
-  labs(
-    title = "Tendências temporais de diversas estimativas",
-    subtitle = "Séries padronizadas (z-score)",
-    x = NULL,
-    y = "Desvio-padrão",
-    color = NULL
-  ) +
-  scale_color_ipea(palette = "Orange-Blue") +
-  theme_ipea()
-triangulacao_temporal
-save_ipeaplot(triangulacao_temporal, "triangulação temporal", format = c("eps", "png"))
-#===============================================================================
-#dados defasados
-#===============================================================================
-
-#lags
-
-names(triang)
-
-triang_lag <- triang |>
-  arrange(ano) |>
-  mutate(
-    homic_excesso1_lag1 = lag(homic_excesso1, 1),
-    homic_excesso1_lag2 = lag(homic_excesso1, 2)
-  )
-
-summary(lm(deficit_demografico ~ homic_excesso1 + homic_excesso1_lag1 + homic_excesso1_lag2, data = triang_lag))
-
-
-#lags
-
-triang_lag <- triang |>
-  arrange(ano) |>
-  mutate(
-    homic_excesso2_lag1 = lag(homic_excesso2, 1),
-    homic_excesso2_lag2 = lag(homic_excesso2, 2)
-  )
-
-summary(lm(deficit_demografico ~ homic_excesso2 + homic_excesso2_lag1 + homic_excesso2_lag2, data = triang_lag))
-
-
-#lags
-
-triang_lag <- triang |>
-  arrange(ano) |>
-  mutate(
-    homic_excesso3_lag1 = lag(homic_excesso3, 1),
-    homic_excesso3_lag2 = lag(homic_excesso3, 2)
-  )
-
-summary(lm(deficit_demografico ~ homic_excesso3 + homic_excesso3_lag1 + homic_excesso3_lag2, data = triang_lag))
 #==============================================================================
 #Gráfico de triangulação entre défict demográfico e excessos de mortes violentas
 #==============================================================================
@@ -1651,12 +1496,7 @@ summary(lm(deficit_demografico ~ homic_excesso3 + homic_excesso3_lag1 + homic_ex
 triang_long_disp <- triang |>
   select(
     deficit_demografico,
-    homic_excesso1,
-    homic_excesso2,
-    homic_excesso3,
-    viol_excesso1,
-    viol_excesso2,
-    viol_excesso3
+    matches("^(homic|viol)_excesso_t")
   ) |>
   pivot_longer(
     -deficit_demografico,
@@ -1734,9 +1574,127 @@ mortes_violentas_defict_populacional
 save_ipeaplot(mortes_violentas_defict_populacional, "mortes violentas e déficit populacional",
               format = c("eps", "png"))
 
+
+#Sincronia: magnitudes diferentes, tendências convergentes?
+
+triang_long <- triang |>
+  pivot_longer(
+    -ano,
+    names_to = "serie",
+    values_to = "valor"
+  ) |>
+  group_by(serie) |>
+  mutate(valor_z = as.numeric(scale(valor))) |>
+  ungroup()
+
+triangulacao_temporal <- ggplot(triang_long, aes(x = ano, y = valor_z, color = serie)) +
+  geom_line(linewidth = 1.1) +
+  geom_vline(xintercept = c(1964, 1985), linetype = "dashed") +
+  labs(
+    title = "Tendências temporais de diversas estimativas",
+    subtitle = "Séries padronizadas (z-score)",
+    x = NULL,
+    y = "Desvio-padrão",
+    color = NULL
+  ) +
+  scale_color_ipea(palette = "Orange-Blue") +
+  theme_ipea()
+triangulacao_temporal
+save_ipeaplot(triangulacao_temporal, "triangulação temporal", format = c("eps", "png"))
+
+
+
+
+#===============================================================================
+#dados defasados
+#===============================================================================
+
+#lags
+
+names(triang)
+
+triang_lag <- triang |>
+  arrange(ano) |>
+  mutate(
+    homic_excesso1_lag1 = lag(homic_excesso_t1, 1),
+    homic_excesso1_lag2 = lag(homic_excesso_t1, 2)
+  )
+
+summary(lm(deficit_demografico ~ homic_excesso_t1 + homic_excesso1_lag1 + homic_excesso1_lag2, data = triang_lag))
+
+
+#lags
+
+triang_lag <- triang |>
+  arrange(ano) |>
+  mutate(
+    homic_excesso2_lag1 = lag(homic_excesso_t2, 1),
+    homic_excesso2_lag2 = lag(homic_excesso_t2, 2)
+  )
+
+summary(lm(deficit_demografico ~ homic_excesso_t2 + homic_excesso2_lag1 + homic_excesso2_lag2, data = triang_lag))
+
+
+#lags
+
+triang_lag <- triang |>
+  arrange(ano) |>
+  mutate(
+    homic_excesso3_lag1 = lag(homic_excesso_t3, 1),
+    homic_excesso3_lag2 = lag(homic_excesso_t3, 2)
+  )
+
+summary(lm(deficit_demografico ~ homic_excesso_t3 + homic_excesso3_lag1 + homic_excesso3_lag2, data = triang_lag))
+
+
 #==============================================================================
 #EXPLICAÇÃO ALTERNATIVA: A MIGRAÇÃO
 #==============================================================================
+
+#Fonte: Adas, Melhem.Panorama geográfico brasileiro. São Paulo: Moderna, 2004, p. 286.
+migracao_participacao <- tibble::tribble(
+  ~periodo,        ~percentual,
+  "1808–1890",      8.0,
+  "1891–1900",     29.0,
+  "1901–1920",      7.1,
+  "1921–1940",      8.1,
+  "1941–1950",      1.0,
+  "1951–1960",      3.4,
+  "1961–1970",      0.9
+)
+
+#LEVY, M. S. F.. O papel da migração internacional na evolução da população brasileira (1872 a 1972). Revista de Saúde Pública, v. 8, p. 49–90, jun. 1974. https://doi.org/10.1590/S0034-89101974000500003 
+entradas_imigrantes_decada <- tibble::tribble(
+  ~periodo,        ~imigrantes, ~percentual_total,
+  "1872–1879",      176337,       3.10,
+  "1880–1889",      448622,       7.66,
+  "1890–1899",     1198327,      20.47,
+  "1900–1909",      622407,      10.63,
+  "1910–1919",      815453,      13.93,
+  "1920–1929",      846647,      14.46,
+  "1930–1939",      332768,       5.68,
+  "1940–1949",      114085,       1.94,
+  "1950–1959",      583068,       9.95,
+  "1960–1969",      197587,       3.37,
+  "1970–2004",      520877,       8.80
+)
+
+#IBGE. Estatísticas históricas do Brasil. Séries econômicas, Demográficas e Sociais de 1550 a 1985. V. 3, p. 28-33, 1986.
+pop_imigrante_censos <- tibble::tribble(
+  ~ano, ~pop_total,   ~pop_imigrante, ~percentual,
+  1872, 10112061,       389459,         3.85,
+  1890, 14333915,       351618,         2.45,
+  1900, 17318565,      1074311,         6.20,
+  1920, 30635605,      1565961,         5.11,
+  1940, 41236315,      1406342,         3.41,
+  1950, 51944397,      1213974,         2.33,
+  1960, 70992343,      1400245,         1.97,
+  1970, 93134846,      1229128,         1.32,
+  1980,119011052,      1110910,         0.93,
+  1991,146825475,       767773,         0.52,
+  2000,169590693,       683982,         0.40
+)
+
 
 
 # ============================================================
@@ -1885,39 +1843,56 @@ triang_migracao <- triang |>
 
 summary(
   lm(
-    deficit_demografico ~ saldo_migratorio_ano + homic_excesso1 + ano,
+    deficit_demografico ~ saldo_migratorio_ano + homic_excesso_t1,
     data = triang_migracao
   )
 )
 
 summary(
   lm(
-    deficit_demografico ~ saldo_migratorio_ano + homic_excesso2 + ano,
+    deficit_demografico ~ saldo_migratorio_ano + homic_excesso_t2,
     data = triang_migracao
   )
 )
 
 summary(
   lm(
-    deficit_demografico ~ saldo_migratorio_ano + homic_excesso3 + ano,
+    deficit_demografico ~ saldo_migratorio_ano + homic_excesso_t3,
     data = triang_migracao
   )
 )
+
 
 #visualização
 
-anodef <- lm(deficit_demografico ~ ano, data = triang_migracao)
-summary(anodef)
-triang_migracao$residuos <- anodef$residuals
-defic_migra <- lm(residuos ~ saldo_migratorio_ano, data = triang_migracao)
+# 1. Criar um dataframe com as variáveis necessárias, mantendo o mesmo filtro de NAs
+dados_completos <- triang_migracao %>%
+  select(ano, deficit_demografico, homic_excesso_t1, saldo_migratorio_ano) %>%
+  # Remover NAs das variáveis usadas no modelo anodef
+  na.omit()
+
+# 2. Ajustar o primeiro modelo com esses dados
+anodef <- lm(deficit_demografico ~ homic_excesso_t1, data = dados_completos)
+
+# 3. Adicionar os resíduos ao dataframe
+dados_completos <- dados_completos %>%
+  mutate(residuos_anodef = anodef$residuals)
+
+# 4. Agora ajustar o modelo com os resíduos
+defic_migra <- lm(residuos_anodef ~ saldo_migratorio_ano, data = dados_completos)
+
 summary(defic_migra)
+
+#visualizar a conexão em um gráfico:
 intercept_defmig <- coef(defic_migra)[["(Intercept)"]]
+
 slope_defmig <- coef(defic_migra)[[2]]
+
 txt_lm_dm <- sprintf('y = %.2f + %.2fx, r² = %.2f', intercept_defmig, slope_defmig, 
                      summary(defic_migra)$r.squared)
 
 
-migra_control_ano <- ggplot(triang_migracao, aes(x = saldo_migratorio_ano, y = residuos)) +
+migra_control_ano <- ggplot(dados_completos, aes(x = saldo_migratorio_ano, y = residuos_anodef)) +
   geom_point() +
   geom_smooth(method = "lm", se = T, formula = y ~x, show.legend = T) +
   labs(title = "Déficit populacional controlado por ano e saldo migratório",
@@ -1930,6 +1905,9 @@ migra_control_ano
 save_ipeaplot(migra_control_ano, "efeito de saldo migratório controledo por ano",
               format = c("png", "eps"))
 
+
+
+#PARE AQUI! O RESTANTE ESTÁ EM CONSTRUÇÃO AINDA
 #==============================================================
 #ESTUDO DE COORTE
 #==============================================================
@@ -2066,5 +2044,4 @@ summary(df_placebo$gap)
 
 
 #Deve ser ≈ 0.
-
 
