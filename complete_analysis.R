@@ -1,8 +1,8 @@
-#==============================================================================
-# PACOTES
-#==============================================================================
+#reconstrução homicídios
+#==============================================================
 
-library(readr)
+#pacotes necessários
+
 library(tidyr)
 library(tidyverse)
 library(ggplot2)
@@ -15,8 +15,1470 @@ library(broom)
 library(dplyr)
 
 
-dados_1960_2022 <- read_csv("~/Documentos/IPEA/modelos/reconstrução homicídios/reconstrucao_homicidios_desde_1960/serie_historica_1960_em_diante.csv")
-View(serie_historica_1960_em_diante)
+
+#arquivos
+
+#ATENÇÃO >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+#RENOMEIE O ENDEREÇO ABAIXO COM A LOCALIZAÇÃO DO ARQUIVO dados_mortes_1979_2022
+arquivo_base_homicidios_ocultos <- "/home/matheus/Documentos/IPEA/modelos/reconstrução homicídios/dados_mortes_1979_2022.xlsx"
+
+dados_mortes <- read_excel("~/Documentos/IPEA/modelos/reconstrução homicídios/dados_mortes_1979_2022.xlsx", 
+                           sheet = "Planilha1", col_types = c("numeric", "text", "text", "numeric", "numeric", 
+                                                              "numeric", "numeric", "numeric", 
+                                                              "numeric", "numeric", "numeric"))
+
+#ATENÇÃO >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+#RENOMEIE O ENDEREÇO ABAIXO COM A PASTA ONDE QUER SALVAR OS RESULTADOS
+
+salvar_reconstrucao <- "/home/matheus/Documentos/IPEA/modelos/reconstrução homicídios/reconstrucao_homicidios_desde_1960"
+
+View(dados_mortes)
+
+dados_mortes <- subset(dados_mortes, !is.na(dados_mortes$agressoes_e_confrontos))
+
+dados_mortes$prop_hopmmd <- dados_mortes$agressoes_e_confrontos /(dados_mortes$MG - dados_mortes$MCMD)
+
+dados_mortes$prop_hopmvii <- dados_mortes$agressoes_e_confrontos / (dados_mortes$MCE_total - dados_mortes$MVII)
+
+dados_mortes$prop_MVII_ocultos_CMD <- dados_mortes$MVII/ ((dados_mortes$MG - dados_mortes$MCMD))
+
+#==================================================================
+#simulação de dados
+#==================================================================
+#como a correção que pretendo é probabilística, não basta um sorteio
+#o método 1 é híbrido, combina proporções deterministas com incerteza dos sorteios
+#o método 1 é aplicado às mortes por causas mal definidas (MCMD)
+#inclusive supomos que parte das MCMD seriam MVII, não só agressões e confrontos
+#a literatura médica aponta que MCMD contém mortes violentas (MCE_total) mal classificadas
+#porém, uma análise usando-o também para mortes violentas por intenção indeterminada (MVII)
+#o método 2 supõe aleatoriedade total:
+#a proporção de MVII que poderiam ser homicídios ocultos é aleatória, e esta proporção...
+#é usada numa binomial invertida com probabilidade aleatória
+#assim, o método 2 pressupõe incerteza radical, pois as MVII podem ter vários motivos:
+#erro administrativo, erro policial-judiciário e ocultação deliberada da letalidade policial
+#enquanto no método 1 a proporção é função das razões entre números do ano e Estado,
+#no método 2 cada simulação de cada observação deve ter uma proporção aleatória
+
+# Número de simulações
+n_simulacoes <- 1000
+
+# Função segura para qbinom que lida com NAs
+safe_qbinom <- function(p, size, prob) {
+  result <- rep(NA, length(p))
+  valid <- !is.na(size) & !is.na(prob) & prob >= 0 & prob <= 1 & size >= 0
+  if (any(valid)) {
+    result[valid] <- qbinom(p[valid], size[valid], prob[valid])
+  }
+  return(result)
+}
+
+# Função para calcular as estimativas em cada simulação
+# Agora retorna uma lista com dois resultados
+simular_estimativas <- function(seed) {
+  set.seed(seed)
+  
+  dados_temp <- dados_mortes
+  n_rows <- nrow(dados_temp)
+  
+  # ============================================================
+  # 1. MCMD → homicídios ocultos (única regra)
+  # ============================================================
+  
+  denom_cmd <- dados_temp$MG - (dados_temp$MCMD + dados_temp$MVII)
+  
+  prop_CMD <- dados_temp$agressoes_e_confrontos / denom_cmd
+  prop_CMD <- pmin(pmax(prop_CMD, 0), 1)
+  
+  homicidios_ocultos_CMD <- safe_qbinom(
+    runif(n_rows),
+    dados_temp$MCMD,
+    prop_CMD
+  )
+  
+  # ============================================================
+  # 2. MVII → homicídios ocultos
+  # ============================================================
+  
+  denom_mvi <- dados_temp$MCE_total - dados_temp$MVII
+  
+  prop_MVII <- dados_temp$agressoes_e_confrontos / denom_mvi
+  prop_MVII <- pmin(pmax(prop_MVII, 0), 1)
+  
+  # ------------------
+  # MÉTODO 1: proporção variável
+  # ------------------
+  
+  homicidios_ocultos_MVII_prop <- safe_qbinom(
+    runif(n_rows),
+    dados_temp$MVII,
+    prop_MVII
+  )
+  
+  round(homicidios_intencionais_prop <- 
+          dados_temp$agressoes_e_confrontos +
+          homicidios_ocultos_CMD +
+          homicidios_ocultos_MVII_prop, 0)
+  
+  # ------------------
+  # MÉTODO 2: proporção aleatória
+  # ------------------
+  
+  homicidios_ocultos_MVII_rand <- safe_qbinom(
+    runif(n_rows),
+    dados_temp$MVII,
+    runif(n_rows)
+  )
+  
+  homicidios_intencionais_rand <- 
+    round(dados_temp$agressoes_e_confrontos +
+            homicidios_ocultos_CMD +
+            homicidios_ocultos_MVII_rand, 0)
+  
+  # Robustez
+  homicidios_ocultos_CMD[is.na(homicidios_ocultos_CMD)] <- 0
+  homicidios_ocultos_MVII_prop[is.na(homicidios_ocultos_MVII_prop)] <- 0
+  homicidios_ocultos_MVII_rand[is.na(homicidios_ocultos_MVII_rand)] <- 0
+  homicidios_intencionais_prop[is.na(homicidios_intencionais_prop)] <- 0
+  homicidios_intencionais_rand[is.na(homicidios_intencionais_rand)] <- 0
+  
+  return(list(
+    homicidios_CMD = homicidios_ocultos_CMD,
+    homicidios_MVII_prop = homicidios_ocultos_MVII_prop,
+    homicidios_MVII_rand = homicidios_ocultos_MVII_rand,
+    total_prop = homicidios_intencionais_prop,
+    total_rand = homicidios_intencionais_rand
+  ))
+}
+
+# Verificar estrutura dos dados
+str(dados_mortes)
+
+# Verificar valores problemáticos
+cat("\nValores mínimos e máximos:\n")
+summary(dados_mortes[, c("MG", "MCMD", "MCE_total", "MVII","agressoes_e_confrontos")])
+
+# Verificar se há valores negativos ou zeros problemáticos
+cat("\nVerificando problemas:\n")
+cat("Linhas com MG - MCMD <= 0:", sum((dados_mortes$MG - dados_mortes$MCMD) <= 0, na.rm = TRUE), "\n")
+cat("Linhas com MCE_total - MVII <= 0:", sum((dados_mortes$MCE_total - dados_mortes$MVII) <= 0, na.rm = TRUE), "\n")
+
+# Se houver muitos problemas, ajustar os dados
+problemas <- (dados_mortes$MG - dados_mortes$MCMD) <= 0
+if (any(problemas, na.rm = TRUE)) {
+  cat("Ajustando valores problemáticos...\n")
+  # Adicionar um pequeno valor para evitar divisão por zero
+  dados_mortes$MG[problemas] <- dados_mortes$MG[problemas] + 1
+}
+
+problemas2 <- (dados_mortes$MCE_total - dados_mortes$MVII) <= 0
+if (any(problemas2, na.rm = TRUE)) {
+  cat("Ajustando valores problemáticos (MCE_total-MVII)...\n")
+  dados_mortes$MCE_total[problemas2] <- dados_mortes$MCE_total[problemas2] + 1
+}
+
+# Criar matrizes para armazenar resultados de ambos os métodos
+resultados_prop <- matrix(0, nrow = nrow(dados_mortes), ncol = n_simulacoes)
+resultados_rand <- matrix(0, nrow = nrow(dados_mortes), ncol = n_simulacoes)
+
+cat("\nIniciando simulações...\n")
+pb <- txtProgressBar(min = 0, max = n_simulacoes, style = 3)
+
+res_CMD        <- matrix(0, nrow = nrow(dados_mortes), ncol = n_simulacoes)
+res_MVII_prop  <- matrix(0, nrow = nrow(dados_mortes), ncol = n_simulacoes)
+res_MVII_rand  <- matrix(0, nrow = nrow(dados_mortes), ncol = n_simulacoes)
+res_total_prop <- matrix(0, nrow = nrow(dados_mortes), ncol = n_simulacoes)
+res_total_rand <- matrix(0, nrow = nrow(dados_mortes), ncol = n_simulacoes)
+
+
+for (i in 1:n_simulacoes) {
+  r <- simular_estimativas(i)
+  
+  res_CMD[, i]        <- r$homicidios_CMD
+  res_MVII_prop[, i]  <- r$homicidios_MVII_prop
+  res_MVII_rand[, i]  <- r$homicidios_MVII_rand
+  res_total_prop[, i] <- r$total_prop
+  res_total_rand[, i] <- r$total_rand
+  
+  setTxtProgressBar(pb, i)
+}
+
+close(pb)
+
+# Função segura para quantil
+safe_quantile <- function(x, probs) {
+  if (all(is.na(x)) || length(x) == 0) {
+    return(NA)
+  }
+  quantile(x, probs = probs, na.rm = TRUE)
+}
+
+# MCMD → homicídios ocultos
+dados_mortes$homicidios_ocultos_CMD_media <- rowMeans(res_CMD, na.rm = TRUE)
+
+# MVII → homicídios ocultos
+dados_mortes$homicidios_ocultos_MVII_prop_media <- rowMeans(res_MVII_prop, na.rm = TRUE)
+dados_mortes$homicidios_ocultos_MVII_rand_media <- rowMeans(res_MVII_rand, na.rm = TRUE)
+
+# Totais
+dados_mortes$homicidios_intencionais_prop_media <-
+  round(rowMeans(res_total_prop, na.rm = TRUE), 0)
+
+dados_mortes$homicidios_intencionais_rand_media <-
+  round(rowMeans(res_total_rand, na.rm = TRUE), 0)
+
+dados_mortes$homicidios_intencionais_prop_sd <- apply(res_total_prop, 1, sd, na.rm = TRUE)
+
+dados_mortes$homicidios_intencionais_rand_sd <- apply(res_total_rand, 1, sd, na.rm = TRUE)
+
+#intervalos de confiança:
+
+dados_mortes$homicidios_intencionais_prop_li <-
+  round(apply(res_total_prop, 1, safe_quantile, probs = 0.025), 0)
+
+dados_mortes$homicidios_intencionais_prop_ls <-
+  round(apply(res_total_prop, 1, safe_quantile, probs = 0.975), 0)
+
+dados_mortes$homicidios_intencionais_rand_li <-
+  round(apply(res_total_rand, 1, safe_quantile, probs = 0.025), 0)
+
+dados_mortes$homicidios_intencionais_rand_ls <-
+  round(apply(res_total_rand, 1, safe_quantile, probs = 0.975), 0)
+
+
+# Visualizar resultados
+cat("\n==============================================\n")
+cat("RESULTADOS - MÉTODO 1 (proporção variável)\n")
+cat("==============================================\n")
+print(head(dados_mortes[, c(
+  "homicidios_intencionais_prop_media",
+  "homicidios_intencionais_prop_li",
+  "homicidios_intencionais_prop_ls",
+  "homicidios_intencionais_prop_sd"
+)], 10))
+
+
+cat("\n==============================================\n")
+cat("RESULTADOS - MÉTODO 2 (proporção aleatória  )\n")
+cat("==============================================\n")
+print(head(dados_mortes[, c(
+  "homicidios_intencionais_rand_media",
+  "homicidios_intencionais_rand_li",
+  "homicidios_intencionais_rand_ls",
+  "homicidios_intencionais_rand_sd"
+)], 10))
+
+# Resumo estatístico
+
+# Criar gráficos comparativos
+if (nrow(dados_mortes) > 1) {
+  cat("\nCriando visualizações comparativas...\n")
+  
+  # Configurar área de plotagem para 2 gráficos lado a lado
+  par(mfrow = c(1, 2))
+  
+  # Gráfico para Método 1
+  plot(dados_mortes$homicidios_intencionais_prop_media, 
+       type = "l", 
+       main = "Método 1: Proporção Variável",
+       xlab = "Observação", 
+       ylab = "Média Estimada",
+       ylim = range(c(dados_mortes$homicidios_intencionais_prop_li, 
+                      dados_mortes$homicidios_intencionais_prop_ls),
+                    na.rm = TRUE))
+  lines(dados_mortes$homicidios_intencionais_prop_li, col = "red", lty = 2)
+  lines(dados_mortes$homicidios_intencionais_prop_ls, col = "red", lty = 2)
+  legend("topright", 
+         legend = c("Média", "IC 95%"), 
+         col = c("black", "red"), 
+         lty = c(1, 2),
+         bty = "n")
+  
+  # Gráfico para Método 2
+  plot(dados_mortes$homicidios_intencionais_rand_media, 
+       type = "l", 
+       main = "Método 2: proporção aleatória ( )",
+       xlab = "Observação", 
+       ylab = "Média Estimada",
+       ylim = range(c(dados_mortes$homicidios_intencionais_rand_li, 
+                      dados_mortes$homicidios_intencionais_rand_ls),
+                    na.rm = TRUE))
+  lines(dados_mortes$homicidios_intencionais_rand_li, col = "blue", lty = 2)
+  lines(dados_mortes$homicidios_intencionais_rand_ls, col = "blue", lty = 2)
+  legend("topright", 
+         legend = c("Média", "IC 95%"), 
+         col = c("black", "blue"), 
+         lty = c(1, 2),
+         bty = "n")
+  
+  # Resetar área de plotagem
+  par(mfrow = c(1, 1))
+  
+  # Gráfico comparativo das médias
+  plot(dados_mortes$homicidios_intencionais_prop_media,
+       dados_mortes$homicidios_intencionais_rand_media,
+       main = "Comparação entre Métodos",
+       xlab = "Método 1 (Proporção Variável)",
+       ylab = "Método 2 (proporção aleatória  )")
+  abline(0, 1, col = "red", lty = 2)  # Linha de igualdade
+  text(mean(dados_mortes$homicidios_intencionais_prop_media, na.rm = TRUE),
+       mean(dados_mortes$homicidios_intencionais_rand_media, na.rm = TRUE),
+       paste("r =", round(cor(dados_mortes$homicidios_intencionais_prop_media,
+                              dados_mortes$homicidios_intencionais_rand_media,
+                              use = "complete.obs"), 4)),
+       pos = 2.2, col = "blue")
+}
+
+# Criar resumo final simplificado
+cat("\n==============================================\n")
+cat("RESUMO FINAL SIMPLIFICADO\n")
+cat("==============================================\n")
+
+dados_mortes$diferenca_metodos <-
+  dados_mortes$homicidios_intencionais_prop_media -
+  dados_mortes$homicidios_intencionais_rand_media
+
+
+# Criar um dataframe resumo
+resumo_final <- data.frame(
+  Observação = 1:nrow(dados_mortes),
+  Agressões = dados_mortes$agressoes_e_confrontos,
+  Método1_Prop_Variável = round(dados_mortes$homicidios_intencionais_prop_media, 0),
+  Método2_Prop_Fixa    = round(dados_mortes$homicidios_intencionais_rand_media, 0),
+  Diferença            = round(dados_mortes$diferenca_metodos, 0),
+  Percentual_Aumento = ifelse(dados_mortes$agressoes_e_confrontos > 0,
+                              round(100 * (dados_mortes$homicidios_intencionais_prop_media - dados_mortes$agressoes_e_confrontos) / dados_mortes$agressoes_e_confrontos, 1),
+                              NA)
+)
+
+colnames(resumo_final) <- c("Obs", "Agressões", "Método1", "Método2", "Dif", "% Aumento vs Agressões")
+
+print(head(resumo_final, 15))
+
+# Salvar resultados se necessário
+
+
+dados_mortes$tx_agressoes <- dados_mortes$agressoes_e_confrontos*1e5/dados_mortes$populacao
+
+dados_mortes$tx_homicid_ajprop <- dados_mortes$homicidios_intencionais_prop_media*100000/dados_mortes$populacao
+
+dados_mortes$tx_homicid_ajrand <- dados_mortes$homicidios_intencionais_rand_media*100000/dados_mortes$populacao
+
+
+
+View(dados_mortes)
+
+write.csv2(dados_mortes, "painel_nacional_1979_2022.csv")
+
+
+#===============================================
+#comparação com o Mapa da Violência
+################################################
+#Os homicídios ocultos do Mapa da Violência foram estimados por Lins e Cerqueira
+#O método foi de regressão logística multinomial, dados de 2012 a 2022
+#restringem-se à estimação de homicídios ocultos por MVII
+#por isso, serão usados como validação externa e seleção do melhor modelo
+#critérios: maior correlação linear e menor raiz do erro quadrático médio
+
+#homicídios mais mortes violentas indeterminadas por ajuste proporcional
+
+dados_teste <- subset(dados_mortes, !is.na(dados_mortes$homicidios_ocultos_Mapa_da_Violencia))
+
+cor_prop_x_MdV <- cor(dados_mortes$homicidios_ocultos_MVII_prop_media,
+                      dados_mortes$homicidios_ocultos_Mapa_da_Violencia, use = "complete.obs")
+
+lm_prop_x_MdV <- lm(dados_mortes$homicidios_ocultos_Mapa_da_Violencia ~ dados_mortes$homicidios_ocultos_MVII_prop_media)
+
+eqm_lm_prop_x_MdV <- sqrt(mean(lm_prop_x_MdV$residuals^2))
+
+cor_rand_x_MdV <- cor(x = dados_mortes$homicidios_ocultos_MVII_rand_media,
+                      y =  dados_mortes$homicidios_ocultos_Mapa_da_Violencia, use = "complete.obs")
+
+lm_rand_x_MdV <- lm(dados_mortes$homicidios_ocultos_Mapa_da_Violencia ~ dados_mortes$homicidios_ocultos_MVII_rand_media)
+
+eqm_rand_x_MdV <- sqrt(mean(lm_rand_x_MdV$residuals^2))
+
+# Tabela de resultados da validação
+resultados_validacao <- tibble(
+  Métrica = c("Correlação", "Raiz do Erro Quadrático Médio"),
+  Método_Proporção = c(round(cor_prop_x_MdV, 4), round(eqm_lm_prop_x_MdV, 2)),
+  Método_Aleatório = c(round(cor_rand_x_MdV, 4), round(eqm_rand_x_MdV, 2))
+)
+
+print(resultados_validacao)
+
+write.csv2(resultados_validacao, "valida_ext_mdv.csv")
+
+dados_mortes$MCE <- dados_mortes$MCE_total - (dados_mortes$homicidios_ocultos_MVII_rand_media + 
+                                                dados_mortes$agressoes_e_confrontos)
+
+dados_mortes$mortes_violentas <- dados_mortes$MCE + dados_mortes$homicidios_intencionais_rand_media
+
+summary(dados_mortes$MCE)
+
+
+#===============================================
+#Agregar por ano
+#===============================================
+
+colunas_numericas <- sapply(dados_mortes, is.numeric)
+print(colunas_numericas)
+
+# Certificar-se de que 'ano' não está incluída nas colunas numéricas para a soma
+# (pois será usada para agrupar)
+colunas_numericas["ano"] <- FALSE
+
+# Listar colunas numéricas
+colunas_para_somar <- names(dados_mortes)[colunas_numericas]
+
+cat("Colunas numéricas identificadas para soma:\n")
+print(colunas_para_somar)
+
+# Criar dataframe com soma por ano usando base R
+dados_mortes_ano <- aggregate(
+  dados_mortes[colunas_para_somar], 
+  by = list(ano = dados_mortes$ano), 
+  FUN = sum, 
+  na.rm = TRUE
+)
+
+# Verificar o resultado
+cat("\nDataFrame com soma por ano (primeiras linhas):\n")
+print(head(dados_mortes_ano))
+
+
+dados_mortes_ano$tx_agressoes <- dados_mortes_ano$agressoes_e_confrontos *100000/dados_mortes_ano$populacao
+
+dados_mortes_ano$tx_homicid_ajprop <- dados_mortes_ano$homicidios_intencionais_prop_media*100000/dados_mortes_ano$populacao
+
+dados_mortes_ano$tx_homicid_ajrand <- dados_mortes_ano$homicidios_intencionais_rand_media*100000/dados_mortes_ano$populacao
+
+#opcional, se não quiser atualizar os dados do DATASUS
+dados_mortes_ano <- dados_mortes_ano %>%
+  filter(ano < 2023)
+
+dados_mortes_ano$anos <- as.numeric(dados_mortes_ano$ano)
+
+ggplot(dados_mortes_ano, aes(x = anos)) +
+  geom_line(aes(y = tx_agressoes, colour =  "agressões"))+
+  scale_x_continuous()+
+  geom_line(aes(y = tx_homicid_ajprop, colour = "homicídios aj prop")) +
+  geom_line(aes(y = tx_homicid_ajrand, colour = "homicídios aj rand")) +
+  labs(title = "estimativas de taxa de homicídios", y = "taxa por 100 mil habitantes", colour = "legenda") +
+  theme_ipea() + scale_color_ipea(pallete = "viridis") + scale_fill_ipea(pallete = "viridis")
+
+write.csv(dados_mortes_ano, file.path(salvar_reconstrucao, "estimativa_nacional.csv"), 
+          row.names = FALSE)
+
+
+#==============================================
+#reconstrução do número e taxas desde 1960
+#==============================================
+#o SIM-DATASUS só publica dados de mortlaidade desde 1979
+#antes disso, só achei dados de mortes por causas externas (MCE) no município de São Paulo, em 1960, 1965, 1970 e 1975
+#São Paulo manteve cerca de 5%-6% da população nacional no período, sendo o principal centro econômico e demográfico
+#poderia as MCE se São Paulo servir de proxy para os homicídios do Brasil todo?
+#para averiguar, utilizamos correlação linear com os homicídios ajustados pelo método anterior
+#testamos dois cenários de correlação: dados de 1979 a 1999, ou de 1979 a 2022
+#por algum motivo, a correlação entre SP e Brasil é mais forte no primeiro cenário, chegando a 95% ou mais
+
+
+#carregar os dados
+dados_mortes_SP <- read_excel("~/Documentos/IPEA/modelos/demografia social da ditadura militar/mortes_violentas_SP.xlsx", 
+                              sheet = "Planilha1")
+
+#verifique o nome das variáveis
+names(dados_mortes_ano)
+names(dados_mortes_SP)
+
+#aumentar o tamanho da série temporal
+anos_completos <- tibble(
+  ano = 1960:2022
+)
+
+dados_mortes_ano_ext <- anos_completos |>
+  left_join(dados_mortes_ano, by = "ano")
+
+#juntar os dados nacionais da reconstrução anterior com os dados do município de São Paulo
+dados_1960_2022 <- dados_mortes_ano_ext |>
+  left_join(dados_mortes_SP, by = "ano")
+
+#restringir a 79-99
+dados_79_99 <- dados_1960_2022 |>
+  filter(ano >= 1979, ano <= 1999)
+
+#calcular correlações
+correlacoes <- tibble(
+  variavel = c(
+    "agressoes_e_confrontos",
+    "homicidios_intencionais_prop_media",
+    "homicidios_intencionais_rand_media",
+    "MCE"
+  ),
+  correlacao = c(
+    cor(dados_79_99$MCE_SP,
+        dados_79_99$agressoes_e_confrontos,
+        use = "complete.obs"),
+    cor(dados_79_99$MCE_SP,
+        dados_79_99$homicidios_intencionais_prop_media,
+        use = "complete.obs"),
+    cor(dados_79_99$MCE_SP,
+        dados_79_99$homicidios_intencionais_rand_media,
+        use = "complete.obs"),
+    cor(dados_79_99$MCE_SP,
+        dados_79_99$MCE,
+        use = "complete.obs")
+  )
+)
+
+correlacoes
+
+#homicídios reconstruídos pelo método 2 terão correlação um pouco maior
+#por sensibilidade, vamos manter as demais medidas
+
+#============================================================
+#imputação linear
+#============================================================
+
+mod_agressoes <- lm(
+  agressoes_e_confrontos ~ poly(MCE_SP, 2),
+  data = dados_79_99
+)
+
+summary(mod_agressoes)
+
+mod_prop_media <- lm(
+  homicidios_intencionais_prop_media ~  poly(MCE_SP, 2),
+  data = dados_79_99
+)
+
+summary(mod_prop_media)
+
+mod_rand_media <- lm(
+  homicidios_intencionais_rand_media ~ poly(MCE_SP, 2),
+  data = dados_79_99
+)
+
+summary(mod_rand_media)
+
+mod_MCE <- lm(
+  MCE ~ poly(MCE_SP, 2),
+  data = dados_79_99
+)
+
+summary(mod_MCE)
+
+anos_para_imputar <- dados_1960_2022 |>
+  filter(
+    ano %in% c(1960, 1965, 1970, 1975),
+    !is.na(MCE_SP)
+  )
+
+pred_agressoes <- round(predict(
+  mod_agressoes,
+  newdata = anos_para_imputar
+),0)
+
+pred_prop_media <- round(predict(
+  mod_prop_media,
+  newdata = anos_para_imputar,
+),0)
+
+pred_rand_media <- round(predict(
+  mod_rand_media,
+  newdata = anos_para_imputar
+),0)
+
+pred_MCE <- round(predict(
+  mod_MCE,
+  newdata = anos_para_imputar
+),0)
+
+dados_1960_2022 <- dados_1960_2022 |>
+  mutate(
+    agressoes_e_confrontos = if_else(
+      ano %in% c(1960, 1965, 1970, 1975),
+      pred_agressoes[match(ano, anos_para_imputar$ano)],
+      agressoes_e_confrontos
+    ),
+    homicidios_intencionais_prop_media = if_else(
+      ano %in% c(1960, 1965, 1970, 1975),
+      pred_prop_media[match(ano, anos_para_imputar$ano)],
+      homicidios_intencionais_prop_media
+    ),
+    homicidios_intencionais_rand_media = if_else(
+      ano %in% c(1960, 1965, 1970, 1975),
+      pred_rand_media[match(ano, anos_para_imputar$ano)],
+      homicidios_intencionais_rand_media
+    ),
+    MCE = if_else(
+      ano %in% c(1960, 1965, 1970, 1975),
+      pred_MCE[match(ano, anos_para_imputar$ano)],
+      MCE
+    )
+  )
+
+dados_1960_2022 <- dados_1960_2022 |>
+  mutate(
+    homicidios_intencionais_rand_media =
+      round(homicidios_intencionais_rand_media, 0),
+    MCE = round(MCE, 0)
+  )
+
+#=================================================
+#interpolação
+#================================================
+
+#agora que imputamos os dados de SP para o Brasil, nos anos com observações, 
+#é hora de interpolar entre os anos sem observações, mas há vários métodos para isso!
+
+
+library(dplyr)
+library(tidyr)
+library(splines)
+
+#preparação
+dados_interp <- dados_1960_2022 |>
+  dplyr::select(ano, homicidios_intencionais_rand_media, MCE)
+
+
+#interpolação linear
+
+interp_linear <- approx(
+  x = dados_interp$ano,
+  y = dados_interp$homicidios_intencionais_rand_media,
+  xout = dados_interp$ano,
+  rule = 1
+)$y
+
+plot(x = dados_interp$ano,interp_linear)
+
+#spline cúbico
+interp_spline <- spline(
+  x = dados_interp$ano,
+  y = dados_interp$homicidios_intencionais_rand_media,
+  xout = dados_interp$ano,
+  method = "fmm"
+)$y
+
+plot(x = dados_interp$ano, y = interp_spline, type = "lines")
+
+#spline cúbico restrito
+interp_spline_nat <- spline(
+  x = dados_interp$ano,
+  y = dados_interp$homicidios_intencionais_rand_media,
+  xout = dados_interp$ano,
+  method = "natural"
+)$y
+
+plot(x = dados_interp$ano, y = interp_spline_nat, type = "lines")
+
+#spline cúbico restrito MCE
+interp_spline_nat_MCE <- spline(
+  x = dados_interp$ano,
+  y = dados_interp$MCE,
+  xout = dados_interp$ano,
+  method = "natural"
+)$y
+
+plot(x = dados_interp$ano, y = interp_spline_nat_MCE, type = "lines")
+
+
+#gostei mais do spline cúbico natural, porque ficou suave
+#as variações curvas tornam as oscilações mais realistas e naturais
+#oscila menos que o spline fmm, e mais que a interpolação linear
+#confesso que a escolha foi um pouco estética, não há grande diferença quantitativa!
+
+#embutir a imputação, spline natural e dados observados em uma só variável
+dados_interp <- dados_1960_2022 |>
+  arrange(ano) |>
+  dplyr::select(ano, homicidios_intencionais_rand_media, MCE)
+
+dados_1960_2022 <- dados_1960_2022 |>
+  arrange(ano) |>
+  mutate(
+    homicidios_intencionais_rand_media =
+      if_else(
+        is.na(homicidios_intencionais_rand_media),
+        interp_spline_nat,
+        homicidios_intencionais_rand_media
+      )
+  )
+
+dados_1960_2022 <- dados_1960_2022 |>
+  mutate(
+    homicidios_intencionais_rand_media =
+      round(homicidios_intencionais_rand_media, 0),
+    MCE = round(MCE, 0)
+  )
+
+
+dados_1960_2022 <- dados_1960_2022 |>
+  arrange(ano) |>
+  mutate(
+    MCE =
+      if_else(
+        is.na(MCE),
+        interp_spline_nat_MCE,
+        MCE
+      )
+  )
+
+#checagem
+
+dados_1960_2022 |>
+  filter(ano <= 1985) |>
+  dplyr::select(
+    ano,
+    homicidios_intencionais_rand_media,
+    MCE
+  )
+
+
+#visualização da série completa
+#homicidios
+numero_homicidios <- ggplot(dados_1960_2022, aes(x = ano)) +
+  geom_line(
+    aes(y = homicidios_intencionais_rand_media),
+    color = "steelblue"
+  ) +
+  geom_point(
+    aes(y = homicidios_intencionais_rand_media),
+    color = "black",
+    size = 2
+  ) +
+  labs(
+    y = "número de homicídios intencionais"
+  ) + theme_ipea() + scale_color_ipea(palette = "Red-Blue-White")
+
+numero_homicidios
+
+save_ipeaplot(numero_homicidios, file.name = "numero_reconstruido_homicidios_desde_1960", format = c("eps", "png"))
+
+
+dados_1960_2022$mortes_violentas <- dados_1960_2022$homicidios_intencionais_rand_media +
+  dados_1960_2022$MCE
+
+
+#mortes violentas (homicídios, acidentes e suicídios)
+numero_MCE <- ggplot(dados_1960_2022, aes(x = ano)) +
+  scale_y_continuous() +
+  geom_line(
+    aes(y = mortes_violentas, colour = "mortes violentas (total)")
+  ) +
+  geom_point(
+    aes(y = mortes_violentas, colour = "mortes violentas (total)"),
+    size = 2
+  ) +
+  geom_line(
+    aes(y = homicidios_intencionais_rand_media, colour = "homicídios")
+  ) +
+  geom_point(
+    aes(y = homicidios_intencionais_rand_media, colour = "homicídios"),
+    size = 2
+  ) +
+  labs(
+    y = "número de mortes",
+    colour = "tipo:"
+  ) + theme_ipea(legend.position = "bottom") + 
+  geom_vline(xintercept = 1979, linetype="dotted")+
+  scale_color_ipea(palette = "Red-Blue-White") +
+  scale_fill_ipea(palette = "Inferno")
+
+numero_MCE
+
+save_ipeaplot(numero_MCE, file.name = "numero_reconstruido_mce_desde_1960", format = c("eps", "png"))
+
+#padronizar os dados estimados, interpolados e observados integrados
+
+dados_1960_2022$população
+
+dados_1960_2022$tx_homicidios <- dados_1960_2022$homicidios_intencionais_rand_media*100000/dados_1960_2022$população
+
+summary(dados_1960_2022$tx_homicidios)
+
+taxa_reconstruida <-ggplot(dados_1960_2022, aes(x = ano)) +
+  scale_x_continuous(
+    breaks = seq(1960, 2022, by = 10),
+    minor_breaks = seq(1960, 2022, by = 5)
+  )+
+  geom_line(
+    aes(y = tx_homicidios),
+    color = "steelblue"
+  )+
+  geom_point(
+    aes(y = tx_homicidios),
+    color = "black",
+    size = 2
+  ) +
+  labs(
+    y = "taxa de homicídios intencionais (por 100 mil hab.)",
+  ) +
+  theme_ipea(x_text_angle = 0) +
+  scale_color_ipea(palette = "Red-Blue-White")
+
+taxa_reconstruida
+
+save_ipeaplot(taxa_reconstruida, "taxa reconstruída", format = c("eps", "png"))
+
+#taxa de mortes por causas externas
+
+dados_1960_2022$tx_mce <- (dados_1960_2022$MCE)*1e5/ dados_1960_2022$população
+
+#taxa de mortes violentas
+
+
+dados_1960_2022$tx_mortes_violentas <- dados_1960_2022$mortes_violentas*1e5/dados_1960_2022$população
+
+summary(dados_1960_2022$tx_mce)
+
+taxa_reconstruida_mce <-ggplot(dados_1960_2022, aes(x = ano)) +
+  scale_x_continuous(
+    breaks = seq(1960, 2022, by = 10),
+    minor_breaks = seq(1960, 2022, by = 5)
+  )+
+  scale_y_continuous()+
+  geom_line(
+    aes(y = tx_mortes_violentas, colour = "taxa de mortes violentas (total)")
+  )+
+  geom_point(
+    aes(y = tx_mortes_violentas, colour = "taxa de mortes violentas (total)"),
+    size = 2
+  ) +
+  geom_line(
+    aes(y = tx_homicidios, colour = "taxa de homicídios"),
+    color = "steelblue"
+  )+
+  geom_point(
+    aes(y = tx_homicidios, colour = "taxa de homicídios"),
+    size = 2
+  ) +
+  labs(
+    y = "taxa de mortes (por 100 mil hab.)",
+    colour = "tipo:"
+  ) +
+  theme_ipea(x_text_angle = 0, legend.position = "bottom") +
+  geom_vline(xintercept = 1979, linetype="dotted")+
+  scale_color_ipea(palette = "Red-Blue-White") +
+  scale_fill_ipea(palette = "Red-Blue-White")
+
+taxa_reconstruida_mce
+
+save_ipeaplot(taxa_reconstruida_mce, "taxa reconstruída causas externas", format = c("eps", "png"))
+
+#Mortes violentas (homicídios+mce)
+
+
+dados_1960_2022$mortes_violentas <- dados_1960_2022$homicidios_intencionais_rand_media +
+  dados_1960_2022$MCE
+
+# ================================================================
+#  GRÁFICO DE ÁREA EMPILHADA PARA NÚMERO (homicídios + MCE)
+# ================================================================
+
+# Preparar dados para área empilhada
+dados_empilhados_numero <- dados_1960_2022 %>%
+  select(ano, 
+         Homicídios = homicidios_intencionais_rand_media, 
+         `Causas Externas` = MCE) %>%
+  pivot_longer(cols = c(Homicídios, `Causas Externas`), 
+               names_to = "Tipo", 
+               values_to = "Valor")
+
+# Ordenar fatores para empilhamento (homicídios embaixo, causas externas em cima)
+dados_empilhados_numero$Tipo <- factor(dados_empilhados_numero$Tipo, 
+                                       levels = c("Causas Externas", "Homicídios"))
+
+# Gráfico de área empilhada
+numero_MCE_empilhado <- ggplot(dados_empilhados_numero, aes(x = ano, y = Valor, fill = Tipo)) +
+  geom_area(alpha = 0.8) +
+  labs(
+    title = "Mortes Violentas no Brasil (1960-2022)",
+    subtitle = "Homicídios e demais causas externas",
+    y = "Número de mortes",
+    x = "Ano",
+    fill = "Tipo de morte"
+  ) +
+  theme_ipea(legend.position = "bottom") +
+  scale_fill_ipea(palette = "Red-Blue-White") +
+  scale_color_ipea(palette = "Red-Blue-White") +
+  scale_x_continuous(
+    breaks = seq(1960, 2022, by = 10),
+    minor_breaks = seq(1960, 2022, by = 5)
+  ) +
+  geom_vline(xintercept = 1979, linetype = "dotted", color = "#666666") +
+  annotate("text", x = 1979, y = max(dados_1960_2022$mortes_violentas), 
+           label = "Início SIM", hjust = -0.1, vjust = 1, size = 3, color = "#666666")
+
+numero_MCE_empilhado
+
+# ================================================================
+# 2. GRÁFICO DE ÁREA EMPILHADA PARA TAXA
+# ================================================================
+
+# Preparar dados para área empilhada de taxas
+dados_empilhados_taxa <- dados_1960_2022 %>%
+  select(ano, 
+         `Taxa Homicídios` = tx_homicidios, 
+         `Taxa Causas Externas` = tx_mce,
+         'tx_mortes_violentas' = tx_mortes_violentas) %>%
+  pivot_longer(cols = c(`Taxa Homicídios`, `Taxa Causas Externas`), 
+               names_to = "Tipo", 
+               values_to = "Taxa")
+
+# Ordenar fatores
+dados_empilhados_taxa$Tipo <- factor(dados_empilhados_taxa$Tipo, 
+                                     levels = c("Taxa Causas Externas", "Taxa Homicídios"))
+
+# Gráfico de área empilhada para taxas
+taxa_reconstruida_mce_empilhado <- ggplot(dados_empilhados_taxa, aes(x = ano, y = Taxa, fill = Tipo)) +
+  geom_area(alpha = 0.8) +
+  labs(
+    title = "Taxa de Mortes Violentas no Brasil (1960-2022)",
+    subtitle = "Por 100 mil habitantes",
+    y = "Taxa por 100 mil habitantes",
+    x = "Ano",
+    fill = "Tipo de morte"
+  ) +
+  theme_ipea(legend.position = "bottom") +
+  scale_fill_ipea(palette = "Red-Blue-White") +
+  scale_color_ipea(palette = "Red-Blue-White") +
+  scale_x_continuous(
+    breaks = seq(1960, 2022, by = 10),
+    minor_breaks = seq(1960, 2022, by = 5)
+  ) +
+  geom_vline(xintercept = 1979, linetype = "dotted", color = "#666666") +
+  annotate("text", x = 1979, y = max(dados_1960_2022$tx_mortes_violentas), 
+           label = "Início SIM", hjust = -0.1, vjust = 1, size = 3, color = "#666666")
+
+taxa_reconstruida_mce_empilhado
+
+
+#======================================================================
+#CONTRAFACTUAIS DOS HOMICÍDIOS
+#======================================================================
+
+#Agora passamos a uma análise dos contrafactuais, não só de mensuração
+#a ideia é definir 3 contrafactuais, com propósitos diversos
+#tratam-se de taxas contrafactuais de homicídios
+#como as taxas de 60-78 são imputadas e interpoladas, deve ser corroborada por...
+#uma análise demográfica de coorte com contrafactual sobre população jovem masculina
+
+
+#contrafactual 1 define efeito amplo do regime, extrapolando a tendência 60-63
+
+#1. Contrafctual de efeito máximo (extrapolação da tendência de 1960 a 1963)
+#tendência pré-evento projetada para frente
+#supõe que a tendência de 1960-1963 prosseguiria linearmente
+#então projeta esta tendência para todo o período
+#é a hipótese mais forte, que supõe um legado violento de longo prazo
+
+dados_pre <- dados_1960_2022 |>
+  filter(ano >= 1960, ano <= 1963)
+
+mod_cf1 <- lm(
+  tx_homicidios ~ ano,
+  data = dados_pre
+)
+summary(mod_cf1)
+
+
+#extrapolação para frente
+dados_1960_2022 <- dados_1960_2022 |>
+  mutate(
+    cf_efeito_max = predict(mod_cf1, newdata = cur_data())
+  )
+
+plot(x = dados_1960_2022$ano, y = dados_1960_2022$cf_efeito_max)
+
+#2. contrafactual se efeito só durante o regime
+#este contrafactual supõe um efeito restrito à duração do regime
+#supõe que a dinâmica da violência foi condicionada pela duração do regime
+#ou seja, cessado o regime, o efeito cessa, a taxa convergiria para a observada imediatamente
+#supõe que o país chegaria "naturalmente" à taxa observada em 1986
+#pode capturar o impacto da violência política e polícia específica do regime militar
+#para dados pré e pós regime, os valores são iguais aos dados
+#mas é mais limitada para capturar o legado de médio e longo prazo da ditadura militar
+
+dados_cf2_base <- dados_1960_2022 |>
+  filter(ano %in% c(1963, 1986))
+
+ano_inicial <- 1963
+ano_final   <- 1986
+
+tx_inicial <- dados_cf2_base |>
+  dplyr::filter(ano == ano_inicial) |>
+  dplyr::pull(tx_homicidios)
+
+tx_final <- dados_cf2_base |>
+  dplyr::filter(ano == ano_final) |>
+  dplyr::pull(tx_homicidios)
+
+T <- ano_final - ano_inicial
+r <- (log(tx_final) - log(tx_inicial)) / T
+
+cf_duracao_evento_raw <- dados_1960_2022 |>
+  mutate(
+    cf_exp = tx_inicial * exp(r * (ano - ano_inicial))
+  ) |>
+  pull(cf_exp)
+
+dados_1960_2022 <- dados_1960_2022 |>
+  mutate(
+    cf_duracao_evento = if_else(
+      ano >= 1964 & ano <= 1985,
+      cf_duracao_evento_raw,
+      tx_homicidios
+    )
+  )
+
+dados_1960_2022$cf_duracao_evento
+
+
+#3. contrafactual de duração ampliada
+#este contrafactual é um meio termo entre os anteriores
+#inicialmente a tendência seria a mesma de 60-63, mas depois convergiria com os dados observados
+#o marco definido da mudança é o fim do AI-5, em 1978, encerrando os "Anos de Chumbo"...
+#mas depois disso persistiu alguma violência política documentada e transição lenta
+#manteve-se o aparelho policial-militar formado sob a ditadura militar
+#a violência política decaiu, mas ascendeu a violência privada e policial no contexto de mercados ilícitos
+#assim, conjuga legado violento institucional e a expansão internacional do narcotráfico
+#para dados pré e pós regime, os valores são iguais aos dados
+
+#Contrafactual com persistência e decaimento paramétrico
+
+#CF3t′​=λt​⋅CF2t​+(1−λt​)⋅Yt​
+#λt​=exp(−τt−1978​)
+
+#parâmetro de decaimento
+tau <- 10
+
+dados_1960_2022 <- dados_1960_2022 |>
+  mutate(
+    lambda = case_when(
+      ano <= 1978 ~ 1,
+      ano > 1978  ~ exp(-(ano - 1978) / tau)
+    ),
+    cf_duracao_evento_amplo = lambda * cf_efeito_max +
+      (1 - lambda) * tx_homicidios
+  )
+
+summary(dados_1960_2022$cf_duracao_evento_amplo)
+
+range(dados_1960_2022$lambda)
+
+#visualização
+
+ggplot(dados_1960_2022, aes(x = ano)) +
+  geom_line(aes(y = tx_homicidios), color = "black") +
+  geom_line(aes(y = cf_duracao_evento), color = "blue", linetype = "dashed") +
+  geom_line(aes(y = cf_duracao_evento_amplo), color = "red") +
+  labs(
+    y = "Taxa por 100 mil",
+    title = "CF-3′: persistência com decaimento gradual"
+  )
+
+
+
+
+#comparar contrafactuais
+
+taxa_e_cenarios <- ggplot(dados_1960_2022, aes(x = ano ))+
+  geom_line(aes(y = tx_homicidios, colour = "taxa de homicídios"), linewidth = 1.5)+
+  geom_line(aes(y = cf_efeito_max, colour =  "tendência pré-golpe"), linetype = "dashed")+
+  geom_line(aes(y = cf_duracao_evento, colour = "contrafactual 1964-1985"), linetype = "dashed")+
+  geom_line(aes(y = cf_duracao_evento_amplo, colour = "tend. pré-golpe decai após-78"), linetype = "dashed") + 
+  geom_vline(xintercept = 1964, linetype="dotted")+
+  geom_vline(xintercept = 1985, linetype = "dotted")+
+  labs(
+    x = "Ano",
+    y = "Taxa de homicídios (por 100 mil hab.)"
+  ) + theme(legend.title = element_blank()) +
+  theme_ipea(legend.position = "bottom") +  scale_color_ipea(palette = "Red-Blue-White")
+
+taxa_e_cenarios
+
+save_ipeaplot(taxa_e_cenarios, "taxa e cenários", format = c("eps", "png"))
+
+#análise descritiva dos contrafactuais
+
+dados_1960_2022$cf_efeito_max
+summary(dados_1960_2022$cf_efeito_max)
+
+dados_1960_2022$cf_duracao_evento
+summary(dados_1960_2022$cf_duracao_evento)
+
+summary(dados_1960_2022$cf_duracao_evento_amplo)
+dados_1960_2022$cf_duracao_evento_amplo
+
+
+#resultado de interesse é o número de mortes excedentes, não a taxa, 
+#por isso invertemos a diferença entre as taxas
+#a taxa é um nível de violência
+
+dados_1960_2022$excesso_homicidios_cf1 <- pmax(0, (dados_1960_2022$tx_homicidios - dados_1960_2022$cf_efeito_max) *
+                                                 dados_1960_2022$população/100000)
+
+sum(dados_1960_2022$excesso_homicidios_cf1)
+
+dados_1960_2022$excesso_homicidios_cf2 <- pmax(0,(dados_1960_2022$tx_homicidios - dados_1960_2022$cf_duracao_evento) *
+                                                 dados_1960_2022$população/100000)
+
+sum(dados_1960_2022$excesso_homicidios_cf2)
+
+dados_1960_2022$excesso_homicidios_cf3 <- pmax(0,(dados_1960_2022$tx_homicidios - dados_1960_2022$cf_duracao_evento_amplo)*
+                                                 dados_1960_2022$população/100000)
+
+sum(dados_1960_2022$excesso_homicidios_cf3)
+
+#======================================================================
+#CONTRAFACTUAIS DAS CAUSAS EXTERNAS DE MORTALIDADE NO BRASIL
+#======================================================================
+
+#Agora passamos a uma análise dos contrafactuais, não só de mensuração
+#a ideia é definir 3 contrafactuais, com propósitos diversos
+#tratam-se de taxas contrafactuais de mortes por causas externas
+#os contrafactuais são baseados em diferentes suposições sobre o legado do regime
+#militar e sua influência na violência letal no Brasil
+#como as taxas de 60-78 são imputadas e interpoladas, deve ser corroborada por...
+#uma análise demográfica de coorte com contrafactual sobre população jovem e adulta
+#no caso das mortes por causas externas, elas incluem homicídios, acidentes e suicídios
+#incluir os suicídios e acidentes pode ser uma maneira de capturar...
+#efeitos indiretos do endurecimento econômico e político
+#em especial, temos evidências de aumento dos óbitos no trabalho,
+#e acidentes de trânsito no longo prazo, com a difusão do automóvel
+#dos suicídios não temos evidências, mas pode ter sido ocultado pelo regime militar
+
+
+
+
+#contrafactual 1 define efeito amplo do regime, extrapolando a tendência 60-63
+
+#1. Contrafctual de efeito máximo (extrapolação da tendência de 1960 a 1963
+#tendência pré-evento projetada para frente
+#supõe que a tendência de 1960-1965 prosseguiria linearmente
+#então projeta esta tendência para todo o período
+#é a hipótese mais forte, que supõe um legado violento de longo prazo
+
+dados_pre <- dados_1960_2022 |>
+  filter(ano >= 1960, ano <= 1963)
+
+
+
+mod_cf1_mce <- lm(
+  tx_mce ~ ano,
+  data = dados_pre
+)
+summary(mod_cf1_mce)
+
+#extrapolação para frente
+dados_1960_2022 <- dados_1960_2022 |>
+  mutate(
+    cf_efeito_max_mce = predict(mod_cf1_mce, newdata = cur_data())
+  )
+
+plot(x = dados_1960_2022$ano, y = dados_1960_2022$cf_efeito_max_mce)
+
+#2. contrafactual se efeito só durante o regime
+#este contrafactual supõe um efeito restrito à duração do regime
+#supõe que a dinâmica da violência foi condicionada pela duração do regime
+#ou seja, cessado o regime, o efeito cessa
+#supõe que o país chegaria "naturalmente" à taxa observada em 1986
+#pode capturar o impacto da violência política do regime militar, no sentido estrito
+#inclusive impacto indireto, pela deterioração das condições de segurança no trabalho
+#para dados pré e pós regime, os valores são iguais aos dados
+#interpolação mediante taxa exṕonencial
+#O contrafactual exponencial assume crescimento contínuo da taxa de homicídios entre 1963 e 1986, produzindo uma trajetória suavizada que independe de incrementos discretos anuais
+
+#Base com anos inicial e final
+dados_cf2_base <- dados_1960_2022 |>
+  dplyr::filter(ano %in% c(1963, 1985))
+
+#Parâmetros demográficos
+ano_inicial <- 1963
+ano_final   <- 1985
+
+tx_inicial_mce <- dados_cf2_base |>
+  dplyr::filter(ano == ano_inicial) |>
+  dplyr::pull(tx_mce)
+
+tx_final_mce <- dados_cf2_base |>
+  dplyr::filter(ano == ano_final) |>
+  dplyr::pull(tx_mce)
+
+T <- ano_final - ano_inicial
+
+#Taxa exponencial de crescimento
+r_mce <- (log(tx_final_mce) - log(tx_inicial_mce)) / T
+
+
+#Série contrafactual exponencial completa
+cf_duracao_evento_raw_mce <- dados_1960_2022 |>
+  dplyr::mutate(
+    cf_exp_mce = tx_inicial_mce * exp(r_mce * (ano - ano_inicial))) |>
+  pull(cf_exp_mce)
+
+#Aplicando sua regra institucional (efeito só durante o regime)
+dados_1960_2022 <- dados_1960_2022 |>
+  dplyr::mutate(
+    cf_duracao_evento_mce = dplyr::if_else(
+      ano >= 1964 & ano <= 1985,
+      cf_duracao_evento_raw_mce,
+      tx_mce
+    )
+  )
+
+#Resultado final
+dados_1960_2022$cf_duracao_evento_mce
+plot(dados_1960_2022$cf_duracao_evento_mce)
+
+#3. contrafactual de duração ampliada
+#este contrafactual é um meio termo entre os anteriores
+#inicialmente a tendência seria a mesma de 60-63, mas depois convergiria com os dados observados
+#o marco da mudança é o fim do AI-5, em 1978, encerrando o terror total de Estado
+#mas depois disso persistiu alguma violência política documentada e transição lenta
+#a violência política decaiu, mas ascendeu a violência no contexto de mercados ilícitos
+#assim, conjuga legado violento com processos internacionais de difusão do automóvel e do narcotráfico
+# e a persistência de condições perigosas de trabalho
+#para dados pré e pós regime, os valores são iguais aos dados
+
+#Contrafactual com persistência e decaimento paramétrico
+
+#CF3t′​=λt​⋅CF2t​+(1−λt​)⋅Yt​
+#λt​=exp(−τt−1978​)
+
+#parâmetro de decaimento
+tau <- 10
+
+dados_1960_2022 <- dados_1960_2022 |>
+  mutate(
+    lambda = case_when(
+      ano <= 1978 ~ 1,
+      ano > 1978  ~ exp(-(ano - 1978) / tau)
+    ),
+    cf_duracao_evento_amplo_mce = lambda * cf_efeito_max_mce +
+      (1 - lambda) * tx_mce
+  )
+
+summary(dados_1960_2022$cf_duracao_evento_amplo_mce)
+range(dados_1960_2022$lambda)
+
+
+
+
+#comparar contrafactuais
+
+taxa_e_cenarios_mce <- ggplot(dados_1960_2022, aes(x = ano ))+
+  geom_line(aes(y = tx_mce, colour = "taxa de causas externas"), linewidth = 1.5)+
+  geom_line(aes(y = cf_efeito_max_mce, colour =  "tendência pré-golpe"), linetype = "dashed")+
+  geom_line(aes(y = cf_duracao_evento_mce, colour = "contrafactual 1964-1985"), linetype = "dashed")+
+  geom_line(aes(y = cf_duracao_evento_amplo_mce, colour = "tend. pré-golpe decai após-78"), linetype = "dashed") + 
+  geom_vline(xintercept = 1964, linetype="dotted")+
+  geom_vline(xintercept = 1985, linetype = "dotted")+
+  labs(
+    x = "Ano",
+    y = "Taxa de causas externas (por 100 mil hab.)"
+  ) + theme(legend.title = element_blank()) +
+  theme_ipea(legend.position = "bottom") +  scale_color_ipea(palette = "Red-Blue-White")
+
+taxa_e_cenarios_mce
+
+save_ipeaplot(taxa_e_cenarios_mce, "taxas e cenários de mortalidade por causas externas",
+              width = 8, height = 5,format = c("eps", "png"))
+#análise descritiva dos contrafactuais
+
+dados_1960_2022$cf_efeito_max_mce
+summary(dados_1960_2022$cf_efeito_max_mce)
+
+dados_1960_2022$cf_duracao_evento_mce
+summary(dados_1960_2022$cf_duracao_evento_mce)
+
+dados_1960_2022$cf_duracao_evento_amplo_mce
+summary(dados_1960_2022$cf_duracao_evento_amplo_mce)
+
+
+#resultado de interesse é o número de mortes excedentes, não a taxa, 
+#por isso invertemos a diferença entre as taxas
+#a taxa é um nível de violência
+
+dados_1960_2022$excesso_mce_cf1 <- pmax(0,(dados_1960_2022$tx_mce - dados_1960_2022$cf_efeito_max_mce) *
+                                          dados_1960_2022$população/100000)
+
+sum(dados_1960_2022$excesso_mce_cf1)
+
+dados_1960_2022$excesso_mce_cf2 <- pmax(0,(dados_1960_2022$tx_mce - dados_1960_2022$cf_duracao_evento_mce) *
+                                          dados_1960_2022$população/100000)
+
+sum(dados_1960_2022$excesso_mce_cf2)
+
+dados_1960_2022$excesso_mce_cf3 <- pmax(0,(dados_1960_2022$tx_mce - dados_1960_2022$cf_duracao_evento_amplo_mce)*
+                                          dados_1960_2022$população/100000)
+
+sum(dados_1960_2022$excesso_mce_cf3)
+
+#mortes violentas
+
+dados_1960_2022$excesso_mortes_violentascf1 <- dados_1960_2022$excesso_homicidios_cf1 +
+  dados_1960_2022$excesso_mce_cf1
+
+dados_1960_2022$excesso_mortes_violentascf2 <- dados_1960_2022$excesso_homicidios_cf2 +
+  dados_1960_2022$excesso_mce_cf2
+
+dados_1960_2022$excesso_mortes_violentascf3<- dados_1960_2022$excesso_homicidios_cf3 +
+  dados_1960_2022$excesso_mce_cf3
+
+#==============================================================================
+#contrafactual extremo
+#==============================================================================
+
+#homicídios
+dados_1960_2022$homicidio_cf_extremo <- dados_1960_2022$tx_homicidios[4]
+
+dados_1960_2022$homicidio_cf_extremo
+
+dados_1960_2022$excesso_homicidios_cfex <- pmax(0,
+                                                (dados_1960_2022$tx_homicidios-dados_1960_2022$homicidio_cf_extremo) * dados_1960_2022$população/100000)
+
+dados_1960_2022$excesso_homicidios_cfex
+
+summary(dados_1960_2022$excesso_homicidios_cfex)
+
+sum(dados_1960_2022$excesso_homicidios_cfex)
+
+
+# outras mortes por causas externas
+
+dados_1960_2022$mce_cf_extremo <- dados_1960_2022$tx_mce[4]
+
+dados_1960_2022$mce_cf_extremo
+
+dados_1960_2022$excesso_mce_cfex <- pmax(0,
+                                         (dados_1960_2022$tx_mce-dados_1960_2022$mce_cf_extremo) * dados_1960_2022$população/100000)
+
+dados_1960_2022$excesso_mce_cfex
+
+summary(dados_1960_2022$excesso_mce_cfex)
+
+sum(dados_1960_2022$excesso_mce_cfex)
+
+
+# mortes violentas
+
+dados_1960_2022$excesso_mortes_violentas_cfex <- dados_1960_2022$excesso_homicidios_cfex +
+  dados_1960_2022$excesso_mce_cfex
+
+summary(dados_1960_2022$excesso_mortes_violentas_cfex)
+
+#totais de 1964 a 1985
+
+anos_interesse <- dados_1960_2022$ano >= 1964 &
+  dados_1960_2022$ano <= 1985
+
+#homicídios
+sum(
+  dados_1960_2022$excesso_homicidios_cf1[anos_interesse],
+  na.rm = TRUE
+)
+
+sum(
+  dados_1960_2022$excesso_homicidios_cf2[anos_interesse],
+  na.rm = TRUE
+)
+
+sum(
+  dados_1960_2022$excesso_homicidios_cf3[anos_interesse],
+  na.rm = TRUE
+)
+
+sum(
+  dados_1960_2022$excesso_homicidios_cfex[anos_interesse],
+  na.rm = TRUE
+)
+
+#acidentes e suicídios
+sum(
+  dados_1960_2022$excesso_mce_cf1[anos_interesse],
+  na.rm = TRUE
+)
+
+sum(
+  dados_1960_2022$excesso_mce_cf2[anos_interesse],
+  na.rm = TRUE
+)
+
+sum(
+  dados_1960_2022$excesso_mce_cf3[anos_interesse],
+  na.rm = TRUE
+)
+
+sum(
+  dados_1960_2022$excesso_mce_cfex[anos_interesse],
+  na.rm = TRUE
+)
+
+#mortes violentas
+
+sum(
+  dados_1960_2022$excesso_mortes_violentascf1[anos_interesse],
+  na.rm = TRUE
+)
+sum(
+  dados_1960_2022$excesso_mortes_violentascf2[anos_interesse],
+  na.rm = TRUE
+)
+
+sum(
+  dados_1960_2022$excesso_mortes_violentascf3[anos_interesse],
+  na.rm = TRUE
+)
+
+sum(
+  dados_1960_2022$excesso_mortes_violentas_cfex[anos_interesse],
+  na.rm = TRUE
+)
+
+#Tabela resumo: 1964-1985
+
+totais_1964_1985_wide <- tibble(
+  tipo = c(
+    "Homicídios",
+    "Acidentes e suicídios",
+    "Mortes violentas"
+  ),
+  cf1 = c(
+    sum(dados_1960_2022$excesso_homicidios_cf1[anos_interesse], na.rm = TRUE),
+    sum(dados_1960_2022$excesso_mce_cf1[anos_interesse], na.rm = TRUE),
+    sum(dados_1960_2022$excesso_mortes_violentascf1[anos_interesse], na.rm = TRUE)
+  ),
+  cf2 = c(
+    sum(dados_1960_2022$excesso_homicidios_cf2[anos_interesse], na.rm = TRUE),
+    sum(dados_1960_2022$excesso_mce_cf2[anos_interesse], na.rm = TRUE),
+    sum(dados_1960_2022$excesso_mortes_violentascf2[anos_interesse], na.rm = TRUE)
+  ),
+  cf3 = c(
+    sum(dados_1960_2022$excesso_homicidios_cf3[anos_interesse], na.rm = TRUE),
+    sum(dados_1960_2022$excesso_mce_cf3[anos_interesse], na.rm = TRUE),
+    sum(dados_1960_2022$excesso_mortes_violentascf3[anos_interesse], na.rm = TRUE)
+  ),
+  cf_extremo = c(
+    sum(dados_1960_2022$excesso_homicidios_cfex[anos_interesse], na.rm = TRUE),
+    sum(dados_1960_2022$excesso_mce_cfex[anos_interesse], na.rm = TRUE),
+    sum(dados_1960_2022$excesso_mortes_violentas_cfex[anos_interesse], na.rm = TRUE)
+  )
+)
+
+write_excel_csv2(totais_1964_1985_wide, file.path(salvar_reconstrucao, "excessos_mortes_1964_1985.csv"))
+
+#================================================================
+#salvar resultados
+#================================================================
+stopifnot(
+  !anyDuplicated(dados_1960_2022$ano),
+  !any(is.na(dados_1960_2022$ano))
+)
+
+write.csv(dados_1960_2022, file.path(salvar_reconstrucao, "serie_historica_1960_em_diante.csv"), 
+          row.names = FALSE)
+
 
 salvar_reconstrucao <- "/home/matheus/Documentos/IPEA/modelos/reconstrução homicídios/reconstrucao_homicidios_desde_1960"
 
