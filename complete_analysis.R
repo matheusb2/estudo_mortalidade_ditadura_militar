@@ -1,8 +1,8 @@
-#reconstrução homicídios
-#==============================================================
+#==============================================================================
+# PACOTES
+#==============================================================================
 
-#pacotes necessários
-
+library(readr)
 library(tidyr)
 library(tidyverse)
 library(ggplot2)
@@ -11,10 +11,7 @@ library(readxl)
 library(strucchange)
 library(broom)
 library(patchwork)
-library(broom)
 library(dplyr)
-
-
 
 #arquivos
 
@@ -71,11 +68,10 @@ safe_qbinom <- function(p, size, prob) {
   }
   return(result)
 }
-
+set.seed(1234)
 # Função para calcular as estimativas em cada simulação
 # Agora retorna uma lista com dois resultados
 simular_estimativas <- function(seed) {
-  set.seed(seed)
   
   dados_temp <- dados_mortes
   n_rows <- nrow(dados_temp)
@@ -416,6 +412,7 @@ dados_mortes$mortes_violentas <- dados_mortes$MCE + dados_mortes$homicidios_inte
 summary(dados_mortes$MCE)
 
 
+
 #===============================================
 #Agregar por ano
 #===============================================
@@ -623,6 +620,7 @@ dados_1960_2022 <- dados_1960_2022 |>
       round(homicidios_intencionais_rand_media, 0),
     MCE = round(MCE, 0)
   )
+
 
 #=================================================
 #interpolação
@@ -1478,7 +1476,6 @@ stopifnot(
 
 write.csv(dados_1960_2022, file.path(salvar_reconstrucao, "serie_historica_1960_em_diante.csv"), 
           row.names = FALSE)
-
 
 salvar_reconstrucao <- "/home/matheus/Documentos/IPEA/modelos/reconstrução homicídios/reconstrucao_homicidios_desde_1960"
 
