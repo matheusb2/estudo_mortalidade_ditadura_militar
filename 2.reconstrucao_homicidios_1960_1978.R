@@ -12,8 +12,10 @@ library(patchwork)
 library(urca)
 library(tseries)
 
-salvar_reconstrucao <- "/home/matheus/Documentos/IPEA/modelos/reconstrução homicídios/reconstrucao_homicidios_desde_1960"
+salvar_reconstrucao <- "#Escreva onde quiser salvar"
 
+
+dados_mortes <- read_csv("dados_mortes_corrigidos_1979_2022.csv")
 
 #===============================================
 #Agregar por ano
