@@ -309,7 +309,6 @@ for (i in seq_len(length(anos_censo) - 1)) {
 # Se quiser manter o nome original para não alterar o restante do script:
 df_raw <- df_raw_corrigido
 
-
 # ==============================================================================
 # INTERPOLAÇÕES POR MÉTODO EXPONENCIAL MANTENDO O FORMATO LARGO (WIDE)
 # ==============================================================================
@@ -1644,7 +1643,6 @@ save_ipeaplot(
   format = c("eps", "png")
 )
 
-
 # ==============================================================================
 # IMPUTAÇÃO DE MORTES VIOLENTAS (1960–1978) VIA DÉFICIT ESPECÍFICO MASCULINO
 # ==============================================================================
@@ -2803,240 +2801,6 @@ save_ipeaplot(grafico_combinado_emigracao,
               width = 12, height = 10,
               format = c("eps", "png"))
 
-#=============================================================================
-#interação, mediação e variáveis instrumentais
-#=============================================================================
-
-analise_repressao_deficit <- deficits_relativos |>
-  group_by(ano) |>
-  summarise(
-    taxa_deficit_media = mean(taxa_deficit, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-pop_ano <- df_raw |>
-  dplyr::select(ano, populacao = população)
-
-taxa_migracao <- saldo_migratorio_anual_exponencial |>
-  mutate(
-    taxa_migracao = (.data$saldo_migratorio_ano / .data$populacao) * 100
-  ) |>
-  dplyr::select(ano, taxa_migracao)
-
-
-
-head(taxa_migracao)
-names(taxa_migracao)
-
-
-dados_taxas_final <- analise_repressao_deficit |>
-  left_join(
-    taxa_migracao,
-    by = "ano"
-  ) |>
-  left_join(
-    df_raw |> dplyr::select(ano, tx_homicidios, tx_mce),
-    by = "ano"
-  ) |>
-  drop_na(taxa_deficit_media, taxa_migracao, , tx_homicidios, tx_mce)
-
-dados_taxas_final$tx_mortes_violentas <- dados_taxas_final$tx_homicidios +dados_taxas_final$tx_mce
-
-
-# hipótese: taxa de repressão como proxy da intensidade da autocracia militar
-# violência política de Estado se propagou, gerando violência, reduzindo saldo migratório
-# modelo de mediação poderia capturar este efeito
-# efeito direto da repressão política: proxy do impacto social (mortes indiretas)
-# efeito indireto via mortes violentas: violência policial e privada permitida pelo regime
-# efeito indireto via migração: exílio político, emigração econômica, dissuasão da imigração
-
-
-#preparação dos dados
-dados_mediacao <- dados_taxas_final |>
-  left_join(
-    df_raw |> dplyr::select(
-      ano,
-      taxa_repressao = `taxa mortos e desaparecidos`,
-      ac_trabalho = `taxa de acidentes por 100 mil trabalhadores`,
-    ),
-    by = "ano"
-  ) |>
-  filter(ano >= 1961 & ano <= 1990) |>
-  drop_na(
-    taxa_deficit_media,
-    taxa_repressao,
-    tx_mortes_violentas,
-    taxa_migracao,
-    ac_trabalho
-  )
-
-# ----------------------------------------------------------------------
-# MODELO A: mediadores = acidentes_trabalho + migracao
-# ----------------------------------------------------------------------
-
-# Modelos das variáveis mediadoras
-m_acidente <- lm(ac_trabalho ~ taxa_repressao, data = dados_mediacao)
-
-summary(m_acidente)
-
-m_migracao <- lm(taxa_migracao ~ taxa_repressao, data = dados_mediacao)
-
-summary(m_migracao)
-
-# Modelo final (Y)
-m_y_A <- lm(taxa_deficit_media ~ taxa_repressao + ac_trabalho + taxa_migracao,
-            data = dados_mediacao)
-
-summary(m_y_A)
-
-summary(lm(taxa_deficit_media ~ ac_trabalho,
-           data = dados_mediacao))
-
-summary(lm(taxa_deficit_media ~ taxa_migracao,
-           data = dados_mediacao))
-
-# Coeficientes
-a1 <- coef(m_acidente)["taxa_repressao"]
-a2 <- coef(m_migracao)["taxa_repressao"]
-b1 <- coef(m_y_A)["ac_trabalho"]
-b2 <- coef(m_y_A)["taxa_migracao"]
-c_prime <- coef(m_y_A)["taxa_repressao"]
-
-# Efeitos indiretos
-ind_acidente <- a1 * b1
-ind_migracao <- a2 * b2
-ind_total_A <- ind_acidente + ind_migracao
-
-# Efeito total (regressão simples)
-m_total_A <- lm(taxa_deficit_media ~ taxa_repressao, data = dados_mediacao)
-
-summary(m_total_A)
-
-c_total <- coef(m_total_A)["taxa_repressao"]
-
-# Tabela de decomposição (Modelo A)
-tabela_A <- tibble::tibble(
-  Componente = c("Efeito total", "Efeito direto (não mediado)",
-                 "Indireto via acidentes trabalho", "Indireto via migração"),
-  Coeficiente = c(c_total, c_prime, ind_acidente, ind_migracao),
-  Proporcao = c(1, c_prime / c_total, ind_acidente / c_total, ind_migracao / c_total)
-)
-
-print("=== MODELO A (acidentes + migração) ===")
-print(tabela_A)
-
-# Bootstrap para inferência (modelo A)
-boot_mediation_A <- function(data, indices) {
-  d <- data[indices, ]
-  m1 <- lm(ac_trabalho ~ taxa_repressao, data = d)
-  m2 <- lm(taxa_migracao ~ taxa_repressao, data = d)
-  m3 <- lm(taxa_deficit_media ~ taxa_repressao + ac_trabalho + taxa_migracao, data = d)
-  
-  a1 <- coef(m1)["taxa_repressao"]
-  a2 <- coef(m2)["taxa_repressao"]
-  b1 <- coef(m3)["ac_trabalho"]
-  b2 <- coef(m3)["taxa_migracao"]
-  
-  c(a1*b1, a2*b2, a1*b1 + a2*b2)  # ind_acidente, ind_migracao, total_indireto
-}
-
-set.seed(123)
-boot_A <- boot(dados_mediacao, boot_mediation_A, R = 5000)
-
-# Intervalos de confiança
-ic_acidente <- boot.ci(boot_A, index = 1, type = "perc")
-ic_migracao  <- boot.ci(boot_A, index = 2, type = "perc")
-ic_total_ind <- boot.ci(boot_A, index = 3, type = "perc")
-
-cat("\n=== IC 95% (Modelo A) ===\n")
-cat("Efeito indireto via acidentes:", round(ic_acidente$percent[4:5], 3), "\n")
-cat("Efeito indireto via migração: ", round(ic_migracao$percent[4:5], 3), "\n")
-cat("Efeito indireto total:        ", round(ic_total_ind$percent[4:5], 3), "\n")
-
-
-# ----------------------------------------------------------------------
-# MODELO B: três mediadores (violência + acidentes + migração)
-# ----------------------------------------------------------------------
-
-# Modelos das mediadoras
-m_violencia <- lm(tx_mortes_violentas ~ taxa_repressao, data = dados_mediacao)
-
-summary(m_violencia)
-
-summary(lm(taxa_deficit_media ~ taxa_migracao,
-           data = dados_mediacao))
-
-m_acidente  <- lm(ac_trabalho ~ taxa_repressao, data = dados_mediacao)
-
-m_migracao  <- lm(taxa_migracao ~ taxa_repressao, data = dados_mediacao)
-
-# Modelo final
-m_y_B <- lm(taxa_deficit_media ~ taxa_repressao + tx_mortes_violentas + ac_trabalho + taxa_migracao,
-            data = dados_mediacao)
-
-summary(m_y_B)
-
-# Coeficientes
-a1 <- coef(m_violencia)["taxa_repressao"]
-a2 <- coef(m_acidente)["taxa_repressao"]
-a3 <- coef(m_migracao)["taxa_repressao"]
-b1 <- coef(m_y_B)["tx_mortes_violentas"]
-b2 <- coef(m_y_B)["ac_trabalho"]
-b3 <- coef(m_y_B)["taxa_migracao"]
-c_prime <- coef(m_y_B)["taxa_repressao"]
-
-# Efeitos indiretos individuais
-ind_violencia <- a1 * b1
-ind_acidente  <- a2 * b2
-ind_migracao  <- a3 * b3
-ind_total_B <- ind_violencia + ind_acidente + ind_migracao
-
-# Efeito total (mesmo do modelo A, pois Y e X são os mesmos)
-c_total <- coef(m_total_A)["taxa_repressao"]  # já calculado
-
-# Tabela
-tabela_B <- tibble::tibble(
-  Componente = c("Efeito total", "Efeito direto",
-                 "Indireto via violência", "Indireto via acidentes", "Indireto via migração"),
-  Coeficiente = c(c_total, c_prime, ind_violencia, ind_acidente, ind_migracao),
-  Proporcao = c(1, c_prime / c_total,
-                ind_violencia / c_total, ind_acidente / c_total, ind_migracao / c_total)
-)
-
-print("=== MODELO B (violência + acidentes + migração) ===")
-print(tabela_B)
-
-# Bootstrap (três mediadores)
-boot_mediation_B <- function(data, indices) {
-  d <- data[indices, ]
-  m1 <- lm(tx_mortes_violentas ~ taxa_repressao, data = d)
-  m2 <- lm(ac_trabalho ~ taxa_repressao, data = d)
-  m3 <- lm(taxa_migracao ~ taxa_repressao, data = d)
-  m4 <- lm(taxa_deficit_media ~ taxa_repressao + tx_mortes_violentas + ac_trabalho + taxa_migracao,
-           data = d)
-  
-  a1 <- coef(m1)["taxa_repressao"]; b1 <- coef(m4)["tx_mortes_violentas"]
-  a2 <- coef(m2)["taxa_repressao"]; b2 <- coef(m4)["ac_trabalho"]
-  a3 <- coef(m3)["taxa_repressao"]; b3 <- coef(m4)["taxa_migracao"]
-  
-  c(a1*b1, a2*b2, a3*b3, a1*b1 + a2*b2 + a3*b3)
-}
-
-set.seed(123)
-boot_B <- boot(dados_mediacao, boot_mediation_B, R = 5000)
-
-# ICs
-cat("\n=== IC 95% (Modelo B) ===\n")
-cat("Via violência :", round(boot.ci(boot_B, index=1, type="perc")$percent[4:5], 3), "\n")
-cat("Via acidentes :", round(boot.ci(boot_B, index=2, type="perc")$percent[4:5], 3), "\n")
-cat("Via migração  :", round(boot.ci(boot_B, index=3, type="perc")$percent[4:5], 3), "\n")
-cat("Total indireto:", round(boot.ci(boot_B, index=4, type="perc")$percent[4:5], 3), "\n")
-
-write.csv2(tabela_A, file.path(pasta_saida, "mediacao_acidentes_migracao.csv"), row.names = FALSE)
-write.csv2(tabela_B, file.path(pasta_saida, "mediacao_violencia_acidentes_migracao.csv"), row.names = FALSE)
-
-saveRDS(boot_A, file.path(pasta_saida, "boot_mediacao_A.rds"))
-saveRDS(boot_B, file.path(pasta_saida, "boot_mediacao_B.rds"))
 
 #==============================================================================
 # Número de vítimas
@@ -3098,6 +2862,186 @@ total_pessoas_unicas <- pessoas_unicas_coorte |>
 
 print(total_pessoas_unicas)
 
+# ==============================================================================
+# (NOVO) DÉFICIT INFANTIL (0-9 ANOS) E ATUALIZAÇÃO DO TOTAL
+# ==============================================================================
+
+# 1. Déficit em pessoas-ano para 0-9 anos (usando idade_central <= 9.5)
+deficit_criancas <- deficits_all %>%
+  filter(idade_central <= 9.5) %>%
+  group_by(coorte, sexo) %>%
+  summarise(
+    deficit_pessoas_ano_criancas = sum(deficit, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Informações de exposição para essas coortes
+#    Reaproveitamos coortes_info, mas se alguma coorte não estiver lá, criamos
+coortes_info_criancas <- deficit_total %>%
+  filter(idade_central <= 14) %>%
+  group_by(coorte) %>%
+  summarise(
+    ano_inicio = min(ano, na.rm = TRUE),
+    idade_inicio = min(idade_central, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    anos_restantes_idade = pmax(69 - idade_inicio, 0),
+    anos_restantes_tempo = ano_final - ano_inicio,  # ano_final = 1990 (definido antes)
+    anos_exposicao = pmin(anos_restantes_idade, anos_restantes_tempo),
+    peso_exposicao = pmin(anos_exposicao / 10, 1)
+  )
+
+# 3. Pessoas únicas para crianças
+pessoas_unicas_criancas <- deficit_criancas %>%
+  left_join(coortes_info_criancas, by = "coorte") %>%
+  mutate(
+    pessoas_unicas = if_else(
+      anos_exposicao > 0,
+      deficit_pessoas_ano_criancas / anos_exposicao,
+      0
+    ),
+    pessoas_unicas = pessoas_unicas * peso_exposicao
+  )
+
+total_pessoas_unicas_criancas <- sum(pessoas_unicas_criancas$pessoas_unicas, na.rm = TRUE)
+
+print(total_pessoas_unicas_criancas)
+
+# ==============================================================================
+# EXCESSO DE MORTALIDADE DE IDOSOS (50-69) – MÉTODO DE TRANSIÇÃO CONSISTENTE
+# ==============================================================================
+
+# 1. Períodos intercensitários (apenas durante o regime)
+periodos <- tribble(
+  ~ano_ini, ~ano_fim,
+  1960, 1970,
+  1970, 1980,
+  1980, 1991
+)
+
+# 2. Transições (faixa de entrada -> faixa de saída)
+transicoes <- tribble(
+  ~faixa_entrada, ~idade_min_entrada, ~idade_max_entrada,
+  ~faixa_saida,   ~idade_min_saida,   ~idade_max_saida,
+  "40-49", 40, 49, "50-59", 50, 59,
+  "50-59", 50, 59, "60-69", 60, 69
+)
+
+# 3. Função para calcular o excesso (usa surv_lookup para a sobrevivência esperada)
+calcular_excesso_idosos <- function(df_long, ano_ini, ano_fim, idade_min_entrada, idade_max_entrada,
+                                    idade_min_saida, idade_max_saida, surv_lookup) {
+  
+  # População no início (faixa de entrada)
+  pop_ini <- df_long %>%
+    filter(ano == ano_ini,
+           idade_central >= idade_min_entrada & idade_central <= idade_max_entrada) %>%
+    group_by(coorte, sexo) %>%
+    summarise(pop_ini = sum(populacao, na.rm = TRUE), .groups = "drop")
+  
+  # População no fim (faixa de saída) – mesma coorte, 10 anos depois
+  pop_fim <- df_long %>%
+    filter(ano == ano_fim,
+           idade_central >= idade_min_saida & idade_central <= idade_max_saida) %>%
+    group_by(coorte, sexo) %>%
+    summarise(pop_fim_obs = sum(populacao, na.rm = TRUE), .groups = "drop")
+  
+  # Juntar
+  dados <- pop_ini %>%
+    inner_join(pop_fim, by = c("coorte", "sexo")) %>%
+    # Identificar a faixa etária da coorte no início (para buscar a surv anual)
+    mutate(idade_inicio = ano_ini - coorte) %>%
+    mutate(
+      faixa_consulta = case_when(
+        idade_inicio < 15 ~ "0-14",
+        idade_inicio < 30 ~ "15-29",
+        idade_inicio < 50 ~ "30-49",
+        TRUE ~ "50-69"
+      )
+    )
+  
+  # Buscar a sobrevivência anual esperada (do período 1950-60) para essa faixa/sexo
+  dados <- dados %>%
+    left_join(
+      surv_lookup %>% select(sexo, faixa_idade, surv_annual),
+      by = c("sexo", "faixa_consulta" = "faixa_idade")
+    ) %>%
+    mutate(
+      # Sobrevivência decenal esperada = surv_annual^10
+      surv_esp_dec = surv_annual^10,
+      # População esperada no fim
+      pop_fim_esp = pop_ini * surv_esp_dec,
+      # Excesso = esperado - observado (se positivo)
+      excesso = pmax(pop_fim_esp - pop_fim_obs, 0)
+    )
+  
+  # Diagnóstico: mostrar alguns valores
+  cat("Período:", ano_ini, "-", ano_fim, " | Faixa entrada:", idade_min_entrada, "-", idade_max_entrada, "\n")
+  cat("  N registros processados:", nrow(dados), "\n")
+  cat("  Soma pop_ini:", sum(dados$pop_ini, na.rm = TRUE), "\n")
+  cat("  Soma pop_fim_obs:", sum(dados$pop_fim_obs, na.rm = TRUE), "\n")
+  cat("  Soma pop_fim_esp:", sum(dados$pop_fim_esp, na.rm = TRUE), "\n")
+  cat("  Excesso total:", sum(dados$excesso, na.rm = TRUE), "\n\n")
+  
+  return(dados)
+}
+
+# 4. Executar para todos os períodos e transições
+resultados_excesso <- tibble()
+
+for (p in 1:nrow(periodos)) {
+  ano_ini <- periodos$ano_ini[p]
+  ano_fim <- periodos$ano_fim[p]
+  
+  for (t in 1:nrow(transicoes)) {
+    trans <- transicoes[t, ]
+    
+    resultado <- calcular_excesso_idosos(
+      df_long = dados_long,        # dados já corrigidos (script 4)
+      ano_ini = ano_ini,
+      ano_fim = ano_fim,
+      idade_min_entrada = trans$idade_min_entrada,
+      idade_max_entrada = trans$idade_max_entrada,
+      idade_min_saida = trans$idade_min_saida,
+      idade_max_saida = trans$idade_max_saida,
+      surv_lookup = surv_lookup
+    )
+    
+    # Agregar total do excesso para essa transição/período
+    total_excesso <- sum(resultado$excesso, na.rm = TRUE)
+    
+    resultados_excesso <- bind_rows(
+      resultados_excesso,
+      tibble(
+        periodo = paste(ano_ini, ano_fim, sep = "-"),
+        faixa_entrada = trans$faixa_entrada,
+        faixa_saida = trans$faixa_saida,
+        excesso_mortes = total_excesso
+      )
+    )
+  }
+}
+
+# 5. Totais por faixa de saída
+total_excesso_50_59 <- resultados_excesso %>%
+  filter(faixa_saida == "50-59") %>%
+  pull(excesso_mortes) %>%
+  sum()
+
+total_excesso_60_69 <- resultados_excesso %>%
+  filter(faixa_saida == "60-69") %>%
+  pull(excesso_mortes) %>%
+  sum()
+
+cat("\n=== EXCESSO DE MORTES NA VELHICE (MÉTODO DE TRANSIÇÃO) ===\n")
+cat("Excesso de mortes na faixa 50-59 anos:", round(total_excesso_50_59, 0), "\n")
+cat("Excesso de mortes na faixa 60-69 anos:", round(total_excesso_60_69, 0), "\n")
+cat("Total (50-69):", round(total_excesso_50_59 + total_excesso_60_69, 0), "\n")
+
+#=======================================================================
+# Desconto da redução do saldo migratório
+#=======================================================================
+
 migracao_reduzida_total <- round(impacto_acumulado |>
                                    filter(decada <= 1990) |>
                                    summarise(
@@ -3111,7 +3055,12 @@ round(migracao_reduzida_total*100/total_pessoas_unicas,2)
 mortes_mais_erro <- total_pessoas_unicas$pessoas_unicas_total -
   migracao_reduzida_total
 
-mortes_mais_erro
+#======================================================================
+# Tabela resumo
+#=====================================================================
+
+prop_criancas <- total_pessoas_unicas_criancas*100/mortes_mais_erro
+print(prop_criancas)
 
 
 excesso_violencia_acumulado <- df_raw |>
@@ -3141,20 +3090,27 @@ tabela_comparativa_final <- tibble::tibble(
     "Excesso de demais violencias – alto (cf1)",
     "Excesso de demais violencias – conservador (cf2)",
     "Excesso de demais violencias – intermediário (cf3)",
-    "Excesso de demais violencias – extremo (cf4)"
+    "Excesso de demais violencias – extremo (cf4)",
+    
+    "Excesso de mortalidade na infância (0-9 anos)",
+    "Excesso de mortalidade na velhice (50-69 anos)"
+    
     
   ),
   Estimativa = c(
-    mortes_mais_erro,
-    excesso_violencia_acumulado$homicidios_cf1,
-    excesso_violencia_acumulado$homicidios_cf2,
-    excesso_violencia_acumulado$homicidios_cf3,
-    excesso_violencia_acumulado$homicidios_cf4,
+    round(mortes_mais_erro,0),
+    round(excesso_violencia_acumulado$homicidios_cf1,0),
+    round(excesso_violencia_acumulado$homicidios_cf2,0),
+    round(excesso_violencia_acumulado$homicidios_cf3,0),
+    round(excesso_violencia_acumulado$homicidios_cf4,0),
     
-    excesso_violencia_acumulado$outras_violencias_cf1,
-    excesso_violencia_acumulado$outras_violencias_cf2,
-    excesso_violencia_acumulado$outras_violencias_cf3,
-    excesso_violencia_acumulado$outras_violencias_cf4
+    round(excesso_violencia_acumulado$outras_violencias_cf1,0),
+    round(excesso_violencia_acumulado$outras_violencias_cf2,0),
+    round(excesso_violencia_acumulado$outras_violencias_cf3,0),
+    round(excesso_violencia_acumulado$outras_violencias_cf4,0),
+    
+    round(total_pessoas_unicas_criancas,0),
+    round(total_excesso_50_59, 0)
   )
 ) |>
   mutate(
@@ -3173,161 +3129,6 @@ write.csv(
   row.names = FALSE
 )
 
-
-#========================================
-#Separar por idade e sexo
-#========================================
-
-deficit_base <- deficits_all |>
-  filter(
-    ano >= ano_inicial,
-    ano <= ano_final,
-    idade_central <= 64.5   # coerente com saída aos 70
-  )
-
-deficit_base <- deficit_base |>
-  mutate(
-    faixa_macro = case_when(
-      idade_central < 15 ~ "0–14",
-      idade_central < 30 & idade_central > 15 ~ "15–29",
-      idade_central < 50 & idade_central > 30 ~ "30–49",
-      TRUE               ~ "50–69"
-    )
-  )
-
-
-coortes_info <- deficit_base |>
-  group_by(coorte) |>
-  summarise(
-    ano_inicio   = min(ano),
-    idade_inicio = min(idade_central),
-    .groups = "drop"
-  ) |>
-  mutate(
-    anos_restantes_idade = pmax(69 - idade_inicio, 0),
-    anos_restantes_tempo = ano_final - ano_inicio,
-    anos_exposicao       = pmin(anos_restantes_idade, anos_restantes_tempo),
-    peso_exposicao       = pmin(anos_exposicao / 10, 1)
-  )
-
-
-pessoas_unicas_idade_sexo <- deficit_base |>
-  group_by(coorte, sexo, faixa_macro) |>
-  summarise(
-    deficit_pessoas_ano = sum(deficit, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
-  left_join(coortes_info, by = "coorte") |>
-  mutate(
-    pessoas_unicas = if_else(
-      anos_exposicao > 0,
-      deficit_pessoas_ano / anos_exposicao,
-      0
-    ),
-    pessoas_unicas = pessoas_unicas * peso_exposicao
-  )
-
-tabela_final <- pessoas_unicas_idade_sexo |>
-  group_by(faixa_macro, sexo) |>
-  summarise(
-    pessoas_unicas = sum(pessoas_unicas, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
-  mutate(
-    percentual = pessoas_unicas / sum(pessoas_unicas) * 100
-  ) |>
-  arrange(desc(pessoas_unicas))
-
-print(tabela_final)
-
-sum(tabela_final$pessoas_unicas)
-
-
-
-#lower, upper and central bound
-
-violencia_central <- 
-  excesso_violencia_acumulado$homicidios_cf4 +
-  excesso_violencia_acumulado$outras_violencias_cf4
-
-migracao_central <- migracao_reduzida_total
-total_media <- pessoas_unicas_media$pessoas_unicas
-total_demografico <- total_media
-R2_modelo <- summary(m_y)$r.squared
-total_explicado_min <- total_media * R2_modelo
-total_alto <- total_media
-residual_central <- total_media - (violencia_central + migracao_central)
-
-
-
-
-prop_direto <- c_prime / c_total
-prop_ind_violencia <- ind_mortes_violentas / c_total
-prop_ind_migracao  <- ind_mig / c_total
-
-prop_mediado <- prop_ind_violencia + prop_ind_migracao
-
-prop_direto + prop_mediado
-# deve ser ≈ 1
-
-
-
-tabela_cenarios <- tibble::tibble(
-  Cenario = c(
-    "Estimativas empíricas independentes",
-    "Mínimo explicado pelo modelo",
-    
-    "Teto estrutural pelo modelo"
-  ),
-  
-  Total_pessoas = c(
-    violencia_central + migracao_central,
-    sum(tabela_final$pessoas_unicas) * R2_modelo,
-    sum(tabela_final$pessoas_unicas)
-  ),
-  
-  choque_regime = c(
-    NA_real_,
-    (sum(tabela_final$pessoas_unicas) * R2_modelo) * prop_direto,
-    sum(tabela_final$pessoas_unicas) * prop_direto
-  ),
-  
-  Regime_via_Violencia = c(
-    violencia_central,
-    (sum(tabela_final$pessoas_unicas) * R2_modelo) * prop_ind_violencia,
-    sum(tabela_final$pessoas_unicas) * prop_ind_violencia
-  ),
-  
-  Regime_via_Migracao = c(
-    migracao_central,
-    (sum(tabela_final$pessoas_unicas) * R2_modelo) * prop_ind_migracao,
-    sum(tabela_final$pessoas_unicas) * prop_ind_migracao
-  ),
-  
-  Nao_explicadas = c(
-    residual_central,
-    sum(tabela_final$pessoas_unicas) * (1 - R2_modelo),
-    0
-  )
-)
-
-
-tabela_cenarios_formatada <- tabela_cenarios |>
-  mutate(
-    across(where(is.numeric), ~ round(.x, 0))
-  )
-
-knitr::kable(
-  tabela_cenarios_formatada,
-  caption = "Cenários de impacto populacional do regime militar (pessoas únicas)",
-  align = "lrrrrr"
-)
-
-write.csv(
-  tabela_cenarios_formatada,
-  file = file.path(pasta_saida, "tabela_cenarios_integrada.csv"),
-  row.names = FALSE
-)
 
 # ==============================================================================
 # PREPARAÇÃO DOS DADOS PARA ANÁLISE DE IMPACTO DO REGIME (0-14 e 50-69)
@@ -3796,6 +3597,10 @@ resultados_bootstrap_hibrido <- map_df(anos_censo, function(a) {
 })
 
 # ==============================================================================
+# 3. GRÁFICO FINAL DE MORTALIDADE OCULTA
+# ==============================================================================
+
+# ==============================================================================
 # CONTRAFACTUAL PARA MORTALIDADE INFANTIL (0-9 ANOS) – INTERPOLAÇÃO EXPONENCIAL
 # ==============================================================================
 
@@ -3916,7 +3721,6 @@ save_ipeaplot(grafico_final_hibrido, "mortalidade implícita intercensitária 0-
               height = 6,
               format = c("png", "eps"))
 
-
 #=========================================================================
 # A taxa de fecundidade foi influenciada pelo regime militar?
 #========================================================================
@@ -3968,6 +3772,7 @@ print(grafico_fecundidade)
 # Salvar (opcional)
 save_ipeaplot(grafico_fecundidade, "fecundidade_regime",
               path = pasta_saida, format = c("eps", "png"))
+
 
 #=======================================================================
 # Os excessos estimados de homicídios e outras mortes violentas explicam o déficit?
@@ -4062,86 +3867,138 @@ for (i in seq_along(vars_excesso)) {
   save_ipeaplot(p, paste0("regressao_", vars_excesso[i]), path = pasta_saida, format = c("eps", "png"))
 }
 
+
 #######################################################################
 #Se for figura única:
 # ----------------------------------------------------------------------
-# REGRESSÕES: DÉFICIT JOVEM (15‑29) vs. EXCESSOS DE MORTES VIOLENTAS
-# FIGURA ÚNICA COM FACETAS
+# GRÁFICO FACETADO: DÉFICIT JOVEM vs. EXCESSOS DE MORTES VIOLENTAS
 # ----------------------------------------------------------------------
 
-library(tidyverse)
-library(patchwork) # opcional para organizar
-
-# 1. Preparar dados no formato longo (uma linha por ano x tipo de excesso)
+# 1. Preparar dados longos para facetar
 dados_long_reg <- dados_reg %>%
   pivot_longer(
-    cols = starts_with("excesso_homicidios_cf") | starts_with("excesso_mce_cf"),
+    cols = all_of(vars_excesso),
     names_to = "variavel",
     values_to = "excesso"
   ) %>%
-  filter(!is.na(excesso), !is.na(espec_deficit))
+  mutate(
+    tipo = case_when(
+      str_detect(variavel, "homicidios") ~ "Homicídios",
+      str_detect(variavel, "mce") ~ "Outras causas externas"
+    ),
+    cenario = case_when(
+      str_detect(variavel, "cf1$") ~ "CF1 (efeito amplo)",
+      str_detect(variavel, "cf2$") ~ "CF2 (duração regime)",
+      str_detect(variavel, "cf3$") ~ "CF3 (decaimento pós-78)",
+      str_detect(variavel, "cfex$") ~ "CF4 (extremo)"
+    ),
+    rotulo = paste(tipo, cenario, sep = "\n")
+  )
 
-# 2. Criar rótulos descritivos para cada variável
-rotulos <- c(
-  "excesso_homicidios_cf1" = "Homicídios (CF1 – efeito amplo)",
-  "excesso_homicidios_cf2" = "Homicídios (CF2 – duração regime)",
-  "excesso_homicidios_cf3" = "Homicídios (CF3 – decaimento pós-78)",
-  "excesso_homicidios_cfex" = "Homicídios (CF4 – extremo)",
-  "excesso_mce_cf1" = "Outras causas externas (CF1)",
-  "excesso_mce_cf2" = "Outras causas externas (CF2)",
-  "excesso_mce_cf3" = "Outras causas externas (CF3)",
-  "excesso_mce_cfex" = "Outras causas externas (CF4)"
-)
-
-dados_long_reg <- dados_long_reg %>%
-  mutate(variavel_label = recode(variavel, !!!rotulos))
-
-# 3. Calcular os modelos e extrair estatísticas para cada variável
-estatisticas <- dados_long_reg %>%
-  group_by(variavel, variavel_label) %>%
+# 2. Calcular estatísticas de regressão para cada painel
+stats_reg <- dados_long_reg %>%
+  group_by(variavel, rotulo) %>%
   summarise(
-    intercepto = coef(lm(espec_deficit ~ excesso))[1],
-    inclinacao = coef(lm(espec_deficit ~ excesso))[2],
-    r2 = summary(lm(espec_deficit ~ excesso))$r.squared,
-    p_val = summary(lm(espec_deficit ~ excesso))$coefficients[2, 4],
+    modelo = list(lm(espec_deficit ~ excesso, data = cur_data())),
     .groups = "drop"
   ) %>%
   mutate(
+    intercepto = map_dbl(modelo, ~ coef(.x)[1]),
+    inclinacao = map_dbl(modelo, ~ coef(.x)[2]),
+    r2 = map_dbl(modelo, ~ summary(.x)$r.squared),
+    p_val = map_dbl(modelo, ~ summary(.x)$coefficients[2, 4]),
     eq_label = paste0(
       "y = ", round(intercepto, 0), " + ", formatC(inclinacao, format = "e", digits = 2), "x\n",
       "R² = ", round(r2, 3), "\n",
       "p = ", ifelse(p_val < 0.001, "< 0.001", round(p_val, 4))
     )
-  )
+  ) %>%
+  select(-modelo)
 
-# 4. Juntar os rótulos aos dados originais
-dados_plot <- dados_long_reg %>%
-  left_join(estatisticas %>% select(variavel, eq_label), by = "variavel")
+# 3. Juntar os rótulos aos dados para posicionamento nos painéis
+# (posicionar no canto inferior direito)
+dados_com_stats <- dados_long_reg %>%
+  left_join(stats_reg, by = c("variavel", "rotulo"))
 
-# 5. Criar o gráfico com facetas
-grafico_reg_facet <- ggplot(dados_plot, aes(x = excesso, y = espec_deficit)) +
-  geom_point(size = 1.5, alpha = 0.5, color = "#1f77b4") +
-  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, color = "steelblue", fill = "steelblue") +
-  geom_text(data = estatisticas, 
-            aes(x = -Inf, y = -Inf, label = eq_label),
-            hjust = -0.1, vjust = -0.5, size = 3, inherit.aes = FALSE) +
-  facet_wrap(~ variavel_label, scales = "free", ncol = 2) +
-  labs(
-    title = "Relação entre excesso de mortes violentas e déficit de jovens (15-29 anos)",
-    subtitle = "Regressões lineares para cada cenário contrafactual – Brasil, 1964-1985",
-    x = "Excesso de mortes (nº de vítimas)",
-    y = "Déficit específico masculino (15-29 anos) – pessoas-ano"
+# 4. Gráfico facetado
+grafico_reg_facetado <- ggplot(dados_com_stats, aes(x = excesso, y = espec_deficit)) +
+  geom_point(alpha = 0.6, size = 1.8, color = "lightblue") +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, color = "pink", fill = "steelblue") +
+  geom_text(
+    data = stats_reg,
+    aes(x = -Inf, y = -Inf, label = eq_label),
+    hjust = -0.1, vjust = -0.5,
+    size = 2.8, color = "black", fontface = "bold"
   ) +
-  theme_ipea() +
+  facet_wrap(~ rotulo, scales = "free", ncol = 4) +
+  labs(
+    title = "Déficit específico masculino (15-29 anos) vs. excesso de mortes violentas",
+    subtitle = "Regressões lineares por cenário contrafactual – período 1964-1985",
+    x = "Excesso de mortes (nº de vítimas)",
+    y = "Déficit (pessoas-ano)"
+  ) +
+  theme_ipea(legend.position = "none") +
   theme(
-    strip.background = element_rect(fill = "#f0f0f0", color = NA),
-    strip.text = element_text(face = "bold", size = 9)
+    strip.background = element_rect(fill = "gray90", color = NA),
+    strip.text = element_text(size = 8, face = "bold"),
+    axis.text = element_text(size = 7),
+    axis.title = element_text(size = 9)
   ) +
   scale_x_continuous(labels = scales::comma) +
   scale_y_continuous(labels = scales::comma)
 
-print(grafico_reg_facet)
+print(grafico_reg_facetado)
+
+# ==============================================================================
+# GRÁFICO DE COORTES: TAXA DE DÉFICIT POR SEXO (HOMENS E MULHERES)
+# ==============================================================================
+
+# 1. Calcular déficit total por coorte e sexo (todos os anos, todas as idades)
+deficit_coorte <- deficits_all %>%
+  filter(ano >= 1961 & ano <= 1990) %>%
+  group_by(coorte, sexo) %>%
+  summarise(
+    deficit_total = sum(deficit, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Obter população inicial da coorte (primeira observação em dados_long)
+pop_inicial <- dados_long %>%
+  group_by(coorte, sexo) %>%
+  arrange(ano) %>%
+  slice(1) %>%
+  select(coorte, sexo, pop_inicial = populacao)
+
+# 3. Calcular taxa de déficit = déficit total / população inicial
+taxa_deficit_coorte <- deficit_coorte %>%
+  left_join(pop_inicial, by = c("coorte", "sexo")) %>%
+  mutate(
+    taxa_deficit = deficit_total / pop_inicial,
+    ano_nascimento = round(coorte)  # coorte = ano de nascimento aproximado
+  ) %>%
+  filter(is.finite(taxa_deficit), pop_inicial > 0)
+
+# 4. Gráfico
+grafico_coortes_sexo <- ggplot(taxa_deficit_coorte, 
+                               aes(x = ano_nascimento, y = taxa_deficit, color = sexo)) +
+  geom_point(alpha = 0.25, size = 1.5) +
+  geom_smooth(method = "loess", se = TRUE, linewidth = 1.5, span = 0.6) +
+  geom_vline(xintercept = 1964, linetype = "dashed", color = "red", alpha = 0.6) +
+  scale_color_manual(values = c("homens" = "#1f77b4", "mulheres" = "#ff7f0e"),
+                     labels = c("Homens", "Mulheres")) +
+  labs(
+    title = "Taxa de déficit de sobrevivência por coorte de nascimento e sexo",
+    subtitle = "déficit (pessoas-ano) / população inicial da coorte. Período de: exposição: 61-90; referência: 50-60.",
+    x = "ano de nascimento da coorte",
+    y = "taxa de pessoas-ano (proporção da coorte ausente)",
+    color = "Sexo"
+  ) +
+  theme_ipea(legend.position = "bottom") +
+  scale_y_continuous(labels = scales::percent, expand = expansion(mult = c(0, 0.05)))
+
+print(grafico_coortes_sexo)
 
 # Salvar (opcional)
-# ggsave("regressoes_facet_excessos.png", grafico_reg_facet, width = 10, height = 12, dpi = 300)
-# save_ipeaplot(grafico_reg_facet, "regressoes_excessos_deficit", format = c("eps", "png"))
+save_ipeaplot(grafico_coortes_sexo, "coortes_deficit_sexo", path = pasta_saida, format = c("eps", "png"))
+
+
