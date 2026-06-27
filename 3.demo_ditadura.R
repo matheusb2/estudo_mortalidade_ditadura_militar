@@ -2340,7 +2340,7 @@ cat("Máxima diferença negativa:",
 cat("\n✅ Análise concluída. Resultados salvos em:", pasta_saida_migracao, "\n")
 
 # ==============================================================================
-# CÁLCULO DA EMIGRAÇÃO E DIFERENÇA EM RELAÇÃO A 1960
+# CÁLCULO DA EMIGRAÇÃO E DIFERENÇA EM RELAÇÃO À DÉCADA DE 1950
 # ==============================================================================
 
 # 1. Preparar dados de imigração por década
@@ -2368,7 +2368,7 @@ emigracao_decada <- saldo_migratorio_decada |>
 
 # 3. Encontrar valores da década de 1960 para referência
 valores_1960 <- emigracao_decada |>
-  filter(decada == 1960) |>
+  filter(decada == 1950) |>
   summarise(
     saldo_1960 = first(saldo_migratorio),
     imigracao_1960 = first(imigrantes_decada),
@@ -3275,13 +3275,13 @@ nascimentos_por_periodo <- df_nascimentos |>
   arrange(ano) |>
   mutate(
     periodo_censo = case_when(
-      ano > 1950 & ano <= 1960 ~ 1960,
-      ano > 1960 & ano <= 1970 ~ 1970,
-      ano > 1970 & ano <= 1980 ~ 1980,
-      ano > 1980 & ano <= 1991 ~ 1991,
-      ano > 1991 & ano <= 2000 ~ 2000,
-      ano > 2000 & ano <= 2010 ~ 2010,
-      ano > 2010 & ano <= 2022 ~ 2022,
+      ano > 1950 & ano <= 1960 ~ 1950,
+      ano > 1960 & ano <= 1970 ~ 1960,
+      ano > 1970 & ano <= 1980 ~ 1970,
+      ano > 1980 & ano <= 1991 ~ 1980,
+      ano > 1991 & ano <= 2000 ~ 1990,
+      ano > 2000 & ano <= 2010 ~ 2000,
+      ano > 2010 & ano <= 2022 ~ 2010,
       TRUE ~ NA_real_
     )
   ) |>
@@ -3409,7 +3409,7 @@ resultados_bootstrap_hibrido <- map_df(anos_censo, function(a) {
     mortalidade_ponto = mean(reps) * 100,
     ic_inf = quantile(reps, 0.025) * 100,
     ic_sup = quantile(reps, 0.975) * 100,
-    regime = ifelse(a %in% c(1970, 1980), "Regime Militar", "Democracia")
+    regime = ifelse(a %in% c(1960, 1970), "Regime Militar", "Democracia")
   )
 })
 
@@ -3818,4 +3818,571 @@ print(grafico_coortes_sexo)
 # Salvar (opcional)
 save_ipeaplot(grafico_coortes_sexo, "coortes_deficit_sexo", path = pasta_saida, format = c("eps", "png"))
 
+# ==============================================================================
+# BACKCASTING EXPANDIDO DE MORTES VIOLENTAS (1950-1978)
+# ==============================================================================
+# Este script pressupõe que os seguintes objetos já existem no ambiente:
+#   - dados_1960_2022 : data.frame com colunas: ano, homicidios_intencionais_rand_media,
+#                       MCE, mortes_violentas, população (e outras)
+#   - analysis_data   : data.frame com colunas: ano, espec_deficit, mortes_violentas, ...
+#   - deficits_relativos : data.frame com colunas: ano, faixa_idade, sexo, taxa_deficit, ...
+# ==============================================================================
+
+library(tidyverse)
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(patchwork)
+library(ipeaplot)
+
+# ------------------------------------------------------------------------------
+# 1. PREPARAÇÃO DOS DADOS
+# ------------------------------------------------------------------------------
+
+# Séries observadas de mortalidade violenta (1979-2022)
+df_obs <- dados_1960_2022 %>%
+  filter(ano >= 1979) %>%
+  select(ano,
+         homicidios = homicidios_intencionais_rand_media,
+         mce = MCE,
+         mortes_violentas = mortes_violentas) %>%
+  pivot_longer(cols = -ano, names_to = "tipo", values_to = "obs")
+
+# Preditores
+# (a) Déficit específico masculino (15-29) em pessoas-ano
+pred1 <- analysis_data %>%
+  select(ano, espec_deficit)
+
+# (b) Mortalidade implícita de homens 15-29 (taxa de déficit relativo)
+#    Extrair de deficits_relativos: média anual da taxa_deficit para homens 15-29
+pred2 <- deficits_relativos %>%
+  filter(sexo == "homens", faixa_idade == "15-29") %>%
+  group_by(ano) %>%
+  summarise(mort_impl_media = mean(taxa_deficit, na.rm = TRUE) / 100, .groups = "drop") %>%
+  # Preencher anos sem dados (antes de 1960) com o primeiro valor disponível (1960)
+  complete(ano = 1950:2022) %>%
+  mutate(mort_impl_media = ifelse(is.na(mort_impl_media), 
+                                  first(na.omit(mort_impl_media)), 
+                                  mort_impl_media))
+
+# Combinar preditores em um único data.frame
+preditores <- pred1 %>%
+  left_join(pred2, by = "ano") %>%
+  # Para backcasting, precisamos de valores para 1950-1978
+  filter(ano >= 1950)
+
+# ------------------------------------------------------------------------------
+# 2. FUNÇÃO PARA BACKCASTING ARIMAX
+# ------------------------------------------------------------------------------
+
+backcast_arimax <- function(y_obs, x_pred, transform = "linear", h = NULL) {
+  anos_ajuste <- 1979:2022
+  anos_previsao <- 1950:1978
+  if (is.null(h)) h <- length(anos_previsao)
+  
+  idx_ajuste <- which(x_pred$ano %in% anos_ajuste)
+  idx_previsao <- which(x_pred$ano %in% anos_previsao)
+  
+  y <- y_obs
+  x <- x_pred$valor[idx_ajuste]
+  x_new <- x_pred$valor[idx_previsao]
+  
+  if (transform == "log") {
+    y <- log(y)
+    x <- log(x)
+    x_new <- log(x_new)
+  }
+  
+  y_rev <- ts(rev(y), frequency = 1)
+  x_rev <- ts(rev(x), frequency = 1)
+  
+  fit <- auto.arima(y_rev, xreg = x_rev, stepwise = FALSE, approximation = FALSE)
+  
+  x_new_rev <- ts(rev(x_new), frequency = 1)
+  pred_rev <- forecast::forecast(fit, xreg = x_new_rev, h = h)
+  
+  pred_mean <- rev(as.numeric(pred_rev$mean))
+  pred_lwr  <- rev(as.numeric(pred_rev$lower[, 2]))
+  pred_upr  <- rev(as.numeric(pred_rev$upper[, 2]))
+  
+  if (transform == "log") {
+    sigma2 <- fit$sigma2
+    pred_mean <- exp(pred_mean + sigma2/2)
+    pred_lwr <- exp(pred_lwr)
+    pred_upr <- exp(pred_upr)
+    
+    # ---- GARANTIR QUE LWR <= UPR ----
+    temp_lwr <- pmin(pred_lwr, pred_upr)
+    temp_upr <- pmax(pred_lwr, pred_upr)
+    pred_lwr <- temp_lwr
+    pred_upr <- temp_upr
+  }  
+  # ---- CORREÇÃO: substitui Inf por NA ----
+  pred_mean[is.infinite(pred_mean)] <- NA
+  pred_lwr[is.infinite(pred_lwr)] <- NA
+  pred_upr[is.infinite(pred_upr)] <- NA
+  
+  
+  tibble(
+    ano = anos_previsao,
+    estimado = pred_mean,
+    lwr = pred_lwr,
+    upr = pred_upr
+  )
+}
+# ------------------------------------------------------------------------------
+# 3. APLICAR PARA TODAS AS COMBINAÇÕES
+# ------------------------------------------------------------------------------
+
+# Definir combinações
+tipos <- c("homicidios", "mce", "mortes_violentas")
+transformacoes <- c("linear", "log")
+preditores_lista <- list(
+  "deficit_especifico" = list(var = "espec_deficit", label = "Déficit específico masculino"),
+  "mort_implicita" = list(var = "mort_impl_media", label = "Mortalidade implícita (homens 15-29)")
+)
+
+# Armazenar resultados
+resultados_backcast <- list()
+
+for (tipo in tipos) {
+  for (trans in transformacoes) {
+    for (pred_nome in names(preditores_lista)) {
+      
+      cat("Processando:", tipo, trans, pred_nome, "\n")
+      
+      # Extrair série observada (1979-2022)
+      y_obs <- df_obs %>% filter(tipo == !!tipo) %>% pull(obs)
+      
+      # Extrair preditor para todo o período
+      x_pred <- preditores %>%
+        select(ano, valor = !!sym(preditores_lista[[pred_nome]]$var))
+      
+      # Fazer backcasting
+      res <- backcast_arimax(y_obs, x_pred, transform = trans)
+      
+      # Guardar com identificadores
+      res <- res %>%
+        mutate(
+          tipo = tipo,
+          transformacao = trans,
+          preditor = pred_nome
+        )
+      
+      resultados_backcast <- bind_rows(resultados_backcast, res)
+    }
+  }
+}
+
+
+# ------------------------------------------------------------------------------
+# 4. MONTAR SÉRIE COMPLETA (OBSERVADO + ESTIMADO) COM PREENCHIMENTO ROBUSTO
+# ------------------------------------------------------------------------------
+
+# Observados: criar um data.frame com todas as combinações de preditor para os anos observados
+obs_expandido <- df_obs %>%
+  # Duplicar para cada combinação de transformação e preditor imputado
+  expand_grid(
+    transformacao = c("linear", "log"),
+    preditor = c("deficit_especifico", "mort_implicita")
+  ) %>%
+  # Adicionar também o preditor "observado" (apenas linear)
+  bind_rows(
+    df_obs %>%
+      mutate(transformacao = "linear", preditor = "observado")
+  ) %>%
+  rename(estimado = obs) %>%
+  mutate(lwr = NA, upr = NA)
+
+# Combinar com estimativas (backcast)
+serie_completa <- resultados_backcast %>%
+  bind_rows(obs_expandido) %>%
+  arrange(ano, tipo, transformacao, preditor)
+
+# Agora, para cada combinação (ano, tipo, transformacao), se houver observado, garantir que todos os preditores tenham esse valor
+serie_completa <- serie_completa %>%
+  group_by(ano, tipo, transformacao) %>%
+  mutate(
+    # Se existe um valor observado neste grupo, pegue-o
+    obs_val = ifelse(any(preditor == "observado"), 
+                     estimado[preditor == "observado"][1], 
+                     NA)
+  ) %>%
+  ungroup() %>%
+  # Substituir NAs nos preditores imputados pelo valor observado, quando disponível
+  mutate(
+    estimado = ifelse(
+      is.na(estimado) & !is.na(obs_val) & preditor != "observado",
+      obs_val,
+      estimado
+    ),
+    lwr = ifelse(
+      is.na(lwr) & !is.na(obs_val) & preditor != "observado",
+      NA,  # não há intervalo para observado
+      lwr
+    ),
+    upr = ifelse(
+      is.na(upr) & !is.na(obs_val) & preditor != "observado",
+      NA,
+      upr
+    )
+  ) %>%
+  select(-obs_val)# ------------------------------------------------------------------------------
+# 5. GRÁFICOS
+# ------------------------------------------------------------------------------
+
+# Função para criar gráfico para um dado preditor e transformação
+plot_backcast <- function(df, pred_nome, trans_nome) {
+  df_filt <- df %>%
+    filter(preditor %in% c(pred_nome, "observado"),
+           transformacao == trans_nome)
+  
+  df_obs <- df_filt %>% filter(preditor == "observado")
+  df_est <- df_filt %>% filter(preditor == pred_nome)
+  
+  # Paleta manual para os três tipos
+  cores_tipo <- c("homicidios" = "#D62728", 
+                  "mce" = "#1F77B4", 
+                  "mortes_violentas" = "#2CA02C")
+  
+  ggplot() +
+    geom_ribbon(data = df_est, 
+                aes(x = ano, ymin = lwr, ymax = upr, fill = tipo), alpha = 0.2) +
+    geom_line(data = df_est, 
+              aes(x = ano, y = estimado, color = tipo), 
+              linewidth = 0.8, linetype = "dashed") +   # size → linewidth
+    geom_line(data = df_obs, 
+              aes(x = ano, y = estimado, color = tipo), 
+              linewidth = 1) +                          # size → linewidth
+    geom_vline(xintercept = 1978.5, linetype = "dotted", color = "gray40") +
+    labs(
+      title = paste("Backcasting de mortes violentas -", 
+                    ifelse(trans_nome == "linear", "linear", "log")),
+      subtitle = paste("Preditor:", 
+                       ifelse(pred_nome == "deficit_especifico", 
+                              "Déficit específico masculino", 
+                              "Mortalidade implícita homens 15-29")),
+      x = "Ano", y = "Número de mortes",
+      color = "Tipo", fill = "Tipo"
+    ) +
+    scale_x_continuous(breaks = seq(1950, 2020, by = 10)) +
+    scale_y_continuous(labels = scales::comma) +
+    scale_color_manual(values = cores_tipo) +   # substitui scale_color_ipea
+    scale_fill_manual(values = cores_tipo) +    # substitui scale_fill_ipea
+    theme_ipea() +                           # substitui theme_ipea
+    theme(legend.position = "bottom")
+}
+# Gerar gráficos para cada combinação
+# (Aqui você pode salvar ou exibir)
+for (pred in c("deficit_especifico", "mort_implicita")) {
+  for (trans in c("linear", "log")) {
+    p <- plot_backcast(serie_completa, pred, trans)
+    print(p)
+    
+    # Salvar (opcional)
+    ggsave(paste0("backcast_", pred, "_", trans, ".png"), p, width = 10, height = 6)
+  }
+}
+
+# ------------------------------------------------------------------------------
+# 6. TABELA POR PERÍODO INTERCENSAL
+# ------------------------------------------------------------------------------
+
+# Definir períodos intercensitários
+periodos <- tribble(
+  ~periodo, ~ano_ini, ~ano_fim,
+  "1950-1959", 1950, 1959,
+  "1960-1969", 1960, 1969,
+  "1970-1978", 1970, 1978,
+  "1979-1989", 1979, 1989,
+  "1990-1999", 1990, 1999,
+  "2000-2009", 2000, 2009,
+  "2010-2022", 2010, 2022
+)
+
+# Para cada combinação, calcular soma por período
+tabela_somas <- serie_completa %>%
+  filter(!is.na(estimado)) %>%
+  mutate(
+    periodo = case_when(
+      ano >= 1950 & ano <= 1959 ~ "1950-1959",
+      ano >= 1960 & ano <= 1969 ~ "1960-1969",
+      ano >= 1970 & ano <= 1978 ~ "1970-1978",
+      ano >= 1979 & ano <= 1989 ~ "1979-1989",
+      ano >= 1990 & ano <= 1999 ~ "1990-1999",
+      ano >= 2000 & ano <= 2009 ~ "2000-2009",
+      ano >= 2010 & ano <= 2022 ~ "2010-2022",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(periodo)) %>%
+  group_by(periodo, tipo, transformacao, preditor) %>%
+  summarise(
+    total = sum(estimado, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Para os observados, manter apenas um preditor (já que é o mesmo)
+  mutate(
+    preditor = ifelse(preditor == "observado", "observado", preditor),
+    # Agrupar observados com transformação "linear" (já que é indiferente)
+    transformacao = ifelse(preditor == "observado", "linear", transformacao)
+  ) %>%
+  distinct(periodo, tipo, transformacao, preditor, total) %>%
+  pivot_wider(
+    names_from = c(tipo, transformacao, preditor),
+    values_from = total,
+    names_sep = "_"
+  )
+
+# Exibir tabela
+print(tabela_somas)
+
+# Salvar (opcional)
+write.csv2(tabela_somas, "tabela_backcast_periodos.csv", row.names = FALSE)
+
+# ------------------------------------------------------------------------------
+# 7. (OPCIONAL) GRÁFICO FACETADO PARA VISUALIZAÇÃO CONJUNTA
+# ------------------------------------------------------------------------------
+# Paleta manual para os três tipos
+cores_tipo <- c("homicidios" = "#D62728", 
+                "mce" = "#1F77B4", 
+                "mortes_violentas" = "#2CA02C")
+
+# Criar um gráfico com todos os cenários em painéis
+grafico_facetado <- serie_completa %>%
+  filter(preditor != "observado") %>%
+  mutate(
+    preditor_label = ifelse(preditor == "deficit_especifico", 
+                            "Déficit específico", 
+                            "Mortalidade implícita"),
+    transformacao_label = ifelse(transformacao == "linear", "Linear", "Log")
+  ) %>%
+  ggplot(aes(x = ano, y = estimado, color = tipo)) +
+  geom_ribbon(aes(ymin = lwr, ymax = upr, fill = tipo), alpha = 0.15) +
+  geom_line(linewidth = 0.8) +                    # size → linewidth
+  geom_line(data = obs_long, aes(x = ano, y = estimado, color = tipo), linewidth = 1) +
+  geom_vline(xintercept = 1978.5, linetype = "dotted") +
+  facet_grid(preditor_label ~ transformacao_label) +
+  labs(x = "Ano", y = "Número de mortes", color = "Tipo", fill = "Tipo") +
+  scale_x_continuous(breaks = seq(1950, 2020, by = 10)) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_color_manual(values = cores_tipo) +
+  scale_fill_manual(values = cores_tipo) +
+  theme_ipea() +
+  theme(legend.position = "bottom")
+
+print(grafico_facetado)
+
+
+# Fim
+
+
+# ==============================================================================
+# EXPANSÃO: CONTRIBUIÇÃO DO AUMENTO DA MORTALIDADE VIOLENTA PARA O DÉFICIT
+# ==============================================================================
+# Pressupõe que os objetos do script anterior (serie_completa, df_raw, 
+# mortes_mais_erro) estão no ambiente.
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Extrair série de mortes violentas (soma) e população
+# ------------------------------------------------------------------------------
+
+# População total por ano (já interpolada no df_raw)
+populacao <- df_raw %>% select(ano, pop = população)
+
+# Série de mortes violentas para todas as combinações (imputadas + observadas)
+# Filtramos apenas o tipo "mortes_violentas"
+mv_series <- serie_completa %>%
+  filter(tipo == "mortes_violentas") %>%
+  select(ano, transformacao, preditor, estimado, lwr, upr)
+
+# Juntar com população
+mv_series <- mv_series %>%
+  left_join(populacao, by = "ano") %>%
+  filter(ano >= 1950 & ano <= 1990)  # limitar ao período de interesse
+
+# ------------------------------------------------------------------------------
+# 2. Calcular taxa por 100 mil habitantes para cada combinação
+# ------------------------------------------------------------------------------
+
+mv_series <- mv_series %>%
+  mutate(
+    taxa = estimado * 100000 / pop,
+    taxa_lwr = lwr * 100000 / pop,
+    taxa_upr = upr * 100000 / pop
+  )
+
+# Para os observados, temos apenas uma combinação (preditor = "observado")
+# Vamos manter as demais combinações (deficit_especifico e mort_implicita, linear e log)
+
+# ------------------------------------------------------------------------------
+# 3. Taxa de referência (média da década de 1950) para cada combinação
+# ------------------------------------------------------------------------------
+
+taxa_ref <- mv_series %>%
+  filter(ano >= 1950 & ano <= 1959) %>%
+  group_by(transformacao, preditor) %>%
+  summarise(
+    taxa_ref = mean(taxa, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Juntar a referência à série completa
+mv_series <- mv_series %>%
+  left_join(taxa_ref, by = c("transformacao", "preditor"))
+
+# ------------------------------------------------------------------------------
+# 4. Calcular excesso anual (apenas quando taxa > referência)
+# ------------------------------------------------------------------------------
+
+mv_series <- mv_series %>%
+  mutate(
+    excesso = pmax(0, (taxa - taxa_ref) * pop / 100000),
+    excesso_lwr = pmax(0, (taxa_lwr - taxa_ref) * pop / 100000),
+    excesso_upr = pmax(0, (taxa_upr - taxa_ref) * pop / 100000)
+  )
+
+# ------------------------------------------------------------------------------
+# 5. Soma do excesso para o período 1961-1990
+# ------------------------------------------------------------------------------
+
+excesso_total <- mv_series %>%
+  filter(ano >= 1961 & ano <= 1990) %>%
+  group_by(transformacao, preditor) %>%
+  summarise(
+    excesso_total = sum(excesso, na.rm = TRUE),
+    excesso_lwr_total = sum(excesso_lwr, na.rm = TRUE),
+    excesso_upr_total = sum(excesso_upr, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# ------------------------------------------------------------------------------
+# 6. Obter o déficit de pessoas únicas (já calculado anteriormente)
+# ------------------------------------------------------------------------------
+
+# O objeto 'mortes_mais_erro' vem do script anterior (déficit líquido de pessoas únicas)
+# Se não existir, calcule a partir de 'total_pessoas_unicas' ou de 'pessoas_unicas_coorte'
+if (!exists("mortes_mais_erro")) {
+  # Se não tiver, podemos calcular novamente (mas já deve existir)
+  # Aqui usamos o valor que estava na tabela final do script anterior
+  # Você pode substituir pelo valor exato que apareceu na sua saída
+  
+}
+
+# ------------------------------------------------------------------------------
+# 7. Tabela comparativa
+# ------------------------------------------------------------------------------
+
+tabela_excesso <- excesso_total %>%
+  mutate(
+    preditor_label = ifelse(preditor == "deficit_especifico", 
+                            "Déficit específico", 
+                            "Mortalidade implícita"),
+    transformacao_label = ifelse(transformacao == "linear", "Linear", "Log")
+  ) %>%
+  unite("cenario", preditor_label, transformacao_label, sep = " - ") %>%
+  dplyr::select(cenario, excesso_total, excesso_lwr_total, excesso_upr_total)
+
+# Adicionar linha com o déficit
+tabela_comparacao <- tabela_excesso %>%
+  add_row(
+    cenario = "Déficit de pessoas únicas (1961-1990)",
+    excesso_total = mortes_mais_erro,
+    excesso_lwr_total = NA,
+    excesso_upr_total = NA
+  )
+
+# Exibir
+print(tabela_comparacao)
+
+# ------------------------------------------------------------------------------
+# 8. Resumo mínimo e máximo entre cenários (para o excesso)
+# ------------------------------------------------------------------------------
+
+excesso_min <- min(tabela_excesso$excesso_total, na.rm = TRUE)
+excesso_max <- max(tabela_excesso$excesso_total, na.rm = TRUE)
+
+cat("\nIntervalo de estimativas do excesso de mortes violentas:\n")
+cat("  Mínimo:", round(excesso_min, 0), "\n")
+cat("  Máximo:", round(excesso_max, 0), "\n")
+cat("Déficit de pessoas únicas:", round(mortes_mais_erro, 0), "\n")
+cat("Proporção do déficit explicada:\n")
+cat("  Mínimo:", round(100 * excesso_min / mortes_mais_erro, 1), "%\n")
+cat("  Máximo:", round(100 * excesso_max / mortes_mais_erro, 1), "%\n")
+
+# ------------------------------------------------------------------------------
+# 9. Gráfico do excesso anual (série temporal) para cada cenário
+# ------------------------------------------------------------------------------
+
+# Preparar dados para gráfico (apenas excesso anual, sem IC para simplificar)
+mv_anual <- mv_series %>%
+  filter(ano >= 1961 & ano <= 1990) %>%
+  mutate(
+    preditor_label = ifelse(preditor == "deficit_especifico", 
+                            "Déficit específico", 
+                            "Mortalidade implícita"),
+    transformacao_label = ifelse(transformacao == "linear", "Linear", "Log"),
+    cenario = paste(preditor_label, transformacao_label, sep = " - ")
+  )
+
+# Gráfico
+# Gráfico
+grafico_excesso_anual <- ggplot(mv_anual, aes(x = ano, y = excesso, color = cenario)) +
+  geom_line(linewidth = 0.9) +
+  geom_vline(xintercept = c(1964, 1985), linetype = "dashed", color = "gray40") +
+  geom_hline(yintercept = mortes_mais_erro / 30, linetype = "dashed", color = "black") +  # média anual do déficit
+  annotate("text", x = 1975, y = mortes_mais_erro / 30 * 1.1, 
+           label = paste("Déficit médio anual:", round(mortes_mais_erro / 30, 0)), 
+           color = "black", size = 4) +
+  labs(
+    title = "Excesso anual de mortes violentas (1961-1990)",
+    subtitle = "Comparação com a taxa de referência da década de 1950",
+    x = "Ano", y = "Excesso de mortes",
+    color = "Cenário", fill = "Cenário"
+  ) +
+  scale_x_continuous(breaks = seq(1960, 1990, by = 5)) +
+  scale_y_continuous(labels = scales::comma) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(override.aes = list(size = 2)))
+
+
+print(grafico_excesso_anual)
+
+# ------------------------------------------------------------------------------
+# 10. Gráfico de barras: proporção do déficit explicada por cada cenário
+# ------------------------------------------------------------------------------
+
+tabela_proporcao <- tabela_excesso %>%
+  dplyr::filter(cenario == "Déficit específico - Linear" | cenario == "Déficit específico - Log") %>%
+    dplyr::select(cenario, excesso_total) %>%
+  mutate(
+    proporcao = excesso_total / mortes_mais_erro * 100
+  )
+
+print(tabela_proporcao)
+
+grafico_barras <- ggplot(tabela_proporcao, aes(x = cenario, y = proporcao, fill = cenario)) +
+  geom_col(alpha = 0.7) +
+  geom_hline(yintercept = 100, linetype = "dashed", color = "red") +
+  labs(
+    title = "Proporção do déficit explicada pelo excesso de mortalidade violenta",
+    x = "", y = "% do déficit total",
+    fill = "cenario"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1))
+
+print(grafico_barras)
+
+# ------------------------------------------------------------------------------
+# 11. Salvar resultados
+# ------------------------------------------------------------------------------
+
+write.csv2(tabela_comparacao, "tabela_excesso_vs_deficit.csv", row.names = FALSE)
+ggsave("excesso_anual_mortes_violentas.png", grafico_excesso_anual, width = 10, height = 6)
+ggsave("proporcao_deficit_explicado.png", grafico_barras, width = 8, height = 5)
+
+cat("\n✅ Análise concluída. Resultados salvos.\n")
 
