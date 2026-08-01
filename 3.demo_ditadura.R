@@ -64,10 +64,6 @@ saveRDS(
 #arquivos
 
 
-#ATENÇÃO >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-#RENOMEIE O ENDEREÇO ABAIXO COM A PASTA ONDE QUER SALVAR OS RESULTADOS
-salvar_reconstrucao <- "/home/matheus/Documentos/IPEA/modelos/reconstrução homicídios/reconstrucao_homicidios_desde_1960"
-
 str(dados_mortes)
 
 
@@ -127,14 +123,20 @@ pasta_saida <- file.path("validação de homicídios")
 dir.create(pasta_saida, recursive = TRUE, showWarnings = FALSE)
 
 # ==============================================================================
-# INTERPOLAÇÕES POR MÉTODO EXPONENCIAL MANTENDO O FORMATO LARGO (WIDE)
+# INTERPOLAÇÕES
 # ==============================================================================
 
 # Identificar os anos censitários
-anos_censo <- c(1950, 1960, 1970, 1980, 1991, 2000, 2010, 2022)
+anos_censo <- c(1940, 1950, 1960, 1970, 1980, 1991, 2000, 2010, 2022)
+
+
+# Método spline cúbico
+
+library(dplyr)
+library(stringr)
 
 # Função para interpolação exponencial
-interp_exponencial <- function(ano, pop, anos_censo) {
+interpolacao <- function(ano, pop, anos_censo) {
   stopifnot(length(ano) == length(pop))
   
   resultado <- pop
@@ -168,15 +170,14 @@ interp_exponencial <- function(ano, pop, anos_censo) {
 
 # Selecionar colunas a serem interpoladas
 cols_pop <- names(df_raw) |>
-  str_subset("^(homens|mulheres)\\s") |>
-  str_subset("contrafactual|déficit", negate = TRUE)
+  str_subset("^(homens|mulheres|população)\\s")
 
 # Aplicar interpolação exponencial para cada grupo populacional
 df_interp <- df_raw |>
   mutate(
     across(
       all_of(cols_pop),
-      ~ interp_exponencial(
+      ~ interpolacao(
         ano = ano,
         pop = .x,
         anos_censo = anos_censo
@@ -184,7 +185,9 @@ df_interp <- df_raw |>
     )
   )
 
+
 df_raw <- df_interp
+
 
 # ==============================================================================
 # IMPUTAÇÃO DA POPULAÇÃO TOTAL (SOMA DOS GRUPOS)
@@ -224,20 +227,14 @@ cat("\nVerificação da imputação:\n")
 cat("Total de NAs na coluna 'população' antes da imputação:", 
     sum(is.na(df_raw$população)), "\n")
 
-# Mostrar anos onde população foi imputada
-anos_imputados <- df_raw |>
-  dplyr::select(ano, população) |>
-  filter(!is.na(população))
-
-cat("\nPopulação imputada para os anos 1960-1978:\n")
-print(anos_imputados)
-
 # Verificar consistência (opcional: comparar com anos censitários)
-cat("\nComparação com anos censitários (1950-2022):\n")
+cat("\nComparação com anos censitários (1940-2022):\n")
 df_raw |>
   filter(ano %in% anos_censo) |>
   dplyr::select(ano, população) |>
   print()
+
+plot(x=df_raw$ano,df_raw$população, type = "l")
 
 # ==============================================================================
 # VERIFICAÇÃO DE CONSISTÊNCIA
@@ -271,7 +268,7 @@ df_raw |>
 
 
 # ==============================================================================
-# ANÁLISE DE COORTES COM CONTRAFACTUAL BASEADO NA SOBREVIVÊNCIA 1950-1960
+# ANÁLISE DE COORTES COM CONTRAFACTUAL BASEADO NA SOBREVIVÊNCIA 1940-1960
 # ==============================================================================
 
 # 1. ESTRUTURAÇÃO DOS DADOS EM FORMATO TIDY/LONGO
@@ -317,9 +314,6 @@ dados_mulheres <- processar_dados_sexo(df_raw, "mulheres", "mulheres")
 # Combinar todos os dados
 dados_long <- bind_rows(dados_homens, dados_mulheres)
 
-
-
-
 #===============================================================
 # Análise exploratória de todas as coortes e períodos
 #===============================================================
@@ -342,36 +336,6 @@ periodos_intercensais <- tribble(
   "2010-2022",   2010,     2022
 )
 
-#função para calcular a sobrevivência por idade
-calc_surv_ref <- function(df, idade_min, idade_max, sexo) {
-  
-  pop_1950 <- df |>
-    filter(
-      ano == 1950,
-      sexo == sexo,
-      idade_central >= idade_min,
-      idade_central <= idade_max
-    ) |>
-    group_by(coorte) |>
-    summarise(pop_1950 = sum(populacao, na.rm = TRUE), .groups = "drop")
-  
-  pop_1960 <- df |>
-    filter(
-      ano == 1960,
-      sexo == sexo,
-      idade_central >= idade_min + 10,
-      idade_central <= idade_max + 10
-    ) |>
-    group_by(coorte) |>
-    summarise(pop_1960 = sum(populacao, na.rm = TRUE), .groups = "drop")
-  
-  pop_1950 |>
-    inner_join(pop_1960, by = "coorte") |>
-    mutate(
-      surv_dec = pop_1960 / pop_1950,
-      surv_annual = surv_dec^(1 / 10)
-    )
-}
 
 surv_ref_all <- function(df, i_min, i_max, s_alvo) {
   # População total da faixa no início e fim do período de referência
@@ -459,34 +423,13 @@ tabela_deficits <- deficits_all |>
 
 print(tabela_deficits)
 
-#gráfico de linhas
-
-grafico_deficits <- deficits_all |>
-  mutate(
-    grupo = paste(faixa_idade, sexo, sep = " - ")
-  ) |>
-  group_by(ano, grupo) |>
-  summarise(
-    deficit_total = sum(deficit, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
-  ggplot(aes(x = ano, y = deficit_total, colour = grupo)) +
-  geom_line(size = 1) +
-  labs(
-    x = "Ano",
-    y = "Déficit demográfico (pessoas-ano)",
-    colour = "Faixa idade-sexo"
-  ) +
-  theme_ipea() +
-  scale_color_ipea(palette = "Red-Blue-White")
-
-print(grafico_deficits)
 
 
 #déficits relativos
 deficits_relativos <- deficits_all |>
   group_by(coorte, sexo) |>
   arrange(ano) |>
+  filter(ano >= 1950) |>
   mutate(
     # Pega a população do registro anterior daquela coorte específica
     pop_anterior = lag(populacao),
@@ -511,30 +454,7 @@ tabela_padronizada <- deficits_relativos |>
 print(tabela_padronizada)
 
 
-#Gráfico das taxas
-grafico_taxas <- deficits_relativos |>
-  mutate(
-    grupo = paste(faixa_idade, sexo, sep = " - ")
-  ) |>
-  group_by(ano, grupo) |>
-  summarise(
-    taxa_media = mean(taxa_deficit, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
-  ggplot(aes(x = ano, y = taxa_media, colour = grupo)) +
-  geom_line(linewidth = 1) + 
-  scale_x_continuous(breaks = c(1950, 1960, 1970, 1980, 1991, 2000, 2010, 2022)) +
-  labs(
-    title = "Intensidade do déficit demográfico relativo",
-    subtitle = "padronizado pela população da coorte no período anterior",
-    x = "ano",
-    y = "taxa de déficit relativo (%)",
-    colour = "Faixa idade-sexo"
-  ) +
-  theme_ipea() +
-  scale_color_ipea(palette = "Red-Blue-White")
 
-print(grafico_taxas)
 
 #Gráfico de área
 
@@ -570,13 +490,14 @@ grafico_area_empilhado_liso <- dados_grafico_area |>
   ) +
   geom_vline(xintercept = 1964, linetype="dotted")+
   geom_vline(xintercept = 1985, linetype="dotted")+
-  # theme_ipea() + # (Reative se estiver usando o pacote do IPEA)
-  # scale_fill_ipea(palette = "Red-Blue-White") + # (Reative se estiver usando o pacote do IPEA)
-  theme_minimal() + # Tema genérico para exemplo
+  theme_ipea() + # (Reative se estiver usando o pacote do IPEA)
+  scale_fill_ipea(palette = "Red-Blue-White") + # (Reative se estiver usando o pacote do IPEA)
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
 print(grafico_area_empilhado_liso)
 
+save_ipeaplot(grafico_area_empilhado_liso, "composicao_deficit",
+              path = pasta_saida, format = c("png", "eps"))
 
 # Agrupamento final para o gráfico de área das taxas
 dados_taxas_area <- deficits_relativos |>
@@ -606,6 +527,9 @@ grafico_final_taxas <- dados_taxas_area |>
 
 print(grafico_final_taxas)
 
+save_ipeaplot(grafico_final_taxas, "taxa_deficit_composicao",
+              path = pasta_saida, format = c("png", "eps"))
+
 #análise de regressão: assassinatos políticos vs déficit demográfico
 
 # 1. Preparação dos Dados para Regressão
@@ -619,11 +543,13 @@ analise_repressao_deficit <- deficits_relativos |>
     by = "ano"
   ) |>
   # Filtramos o período da Ditadura (ou conforme disponibilidade dos dados documentados)
-  filter(ano >= 1960 & ano <= 1991) |>
+  filter(ano >= 1960 & ano <= 1990) |>
   drop_na(taxa_repressao, taxa_deficit_media)
 
 # 2. Cálculo do Modelo de Regressão
 modelo_deficit_repressao <- lm(taxa_deficit_media ~ taxa_repressao, data = analise_repressao_deficit)
+
+summary(modelo_deficit_repressao)
 resumo_lm <- summary(modelo_deficit_repressao)
 
 # 3. Preparação da Equação para o Gráfico
@@ -968,9 +894,9 @@ analysis_data$mmdeficit_mulheres <- zoo::rollmean(analysis_data$total_deficit_mu
 
 # Gráfico adicional para comparar déficits masculino e feminino (opcional)
 linha_tempo_comparacao <- ggplot(analysis_data, aes(x = ano)) +
-  geom_line(aes(y = mmdeficit_homens, colour = "Déficit masculino bruto")) +
-  geom_line(aes(y = mmdeficit_mulheres, colour = "Déficit feminino")) +
-  geom_line(aes(y = mmdeficit, colour = "Déficit específico masculino"), linewidth = 1.2) +
+  geom_line(aes(y = total_deficit_homens, colour = "Déficit masculino bruto")) +
+  geom_line(aes(y = total_deficit_mulheres, colour = "Déficit feminino")) +
+  geom_line(aes(y = espec_deficit, colour = "Déficit específico masculino"), linewidth = 1.2) +
   labs(y = "Déficit (pessoas-ano)", title = "Comparação de déficits por sexo",
        subtitle = "Déficit específico masculino = Déficit masculino - Déficit feminino",
        colour = "") +
@@ -1509,366 +1435,6 @@ coint.test(log(obs_data$mortes_violentas), log(obs_data$espec_deficit))
 coint.test(log(obs_data$mortes_violentas), poly(obs_data$espec_deficit, 2))
 
 
-#================================================
-#Retropolação ARIMAX das mortes violentas
-#================================================
-
-
-# Inverter a ordem dos dados observados (1979 -> 2023 vira 2023 -> 1979)
-obs_rev <- obs_data %>% arrange(desc(ano))
-
-# Criar as séries temporais invertidas (frequência 1, início arbitrário 1)
-y_rev <- ts(obs_rev$mortes_violentas, frequency = 1)
-x_rev <- ts(obs_rev$espec_deficit, frequency = 1)
-
-# Ajustar o modelo ARIMAX na série invertida
-# O modelo aprende como os dados se comportam "voltando no tempo"
-fit_rev <- auto.arima(y_rev, xreg = x_rev, stepwise = FALSE, approximation = FALSE)
-
-
-
-# Realizar o diagnóstico do modelo invertido
-checkresiduals(fit_rev)
-
-# Se você quiser extrair o p-valor do teste de Ljung-Box manualmente:
-test_lb <- Box.test(residuals(fit_rev), type = "Ljung-Box")
-print(test_lb)
-
-# Preparar o regressor para o passado (1978 até 1960)
-# IMPORTANTE: Deve estar em ordem decrescente para o forecast
-pred_years <- 1960:1978
-pred_data <- analysis_data |>
-  filter(ano %in% pred_years) |>
-  dplyr::select(ano, espec_deficit)
-
-pred_rev <- pred_data %>% arrange(desc(ano))
-x_pred_rev <- ts(pred_rev$espec_deficit, frequency = 1)
-
-# Gerar a previsão para o passado
-h_periodos <- nrow(pred_rev)
-if (requireNamespace("forecast", quietly = TRUE)) {
-  prev_rev <- forecast::forecast(fit_rev, xreg = x_pred_rev, h = h_periodos)
-} else {
-  # Alternativa com predict (retorna matriz com pred, se, etc.)
-  prev_rev <- predict(fit_rev, newxreg = x_pred_rev, n.ahead = h_periodos)
-}
-
-# Organizar os resultados e DESINVERTER (voltar para ordem cronológica)
-backcast_mv <- data.frame(
-  ano = pred_rev$ano,
-  mortes_violentas_imputado = as.numeric(prev_rev$mean),
-  mortes_violentas_lwr_95 = as.numeric(prev_rev$lower[,2]),
-  mortes_violentas_upr_95 = as.numeric(prev_rev$upper[,2])
-) %>% arrange(ano) # Volta para 1960 -> 1978
-
-# Unificar para visualização
-serie_completa <- bind_rows(
-  obs_data %>% dplyr::select(ano, valor = mortes_violentas) %>% mutate(tipo = "observado"),
-  backcast_mv %>% dplyr::select(ano, valor = mortes_violentas_imputado) %>% mutate(tipo = "imputado")
-)
-
-
-# Gráfico Final
-rp_ARIMAX <- ggplot() +
-  geom_ribbon(data = backcast_mv, aes(x = ano, 
-                                      ymin = mortes_violentas_lwr_95, ymax = mortes_violentas_upr_95), fill = "red", alpha = 0.1) +
-  geom_line(data = serie_completa, aes(x = ano, y = valor, color = tipo), linewidth = 1) +
-  geom_vline(xintercept = 1978.5, linetype = "dashed") +
-  labs(title = "Retropolação de Mortes Violentas (1960-1978)",
-       subtitle = "Modelo ARIMAX com série invertida e regressor externo",
-       x = "ano", y = "nº de mortes") +
-  theme_ipea() +
-  scale_color_ipea(palette = "Red-Blue-White") +
-  scale_fill_ipea(palette = "Red-Blue-White")
-
-print(rp_ARIMAX)
-
-# Cálculo das Taxas
-# 1. Unificar população (verifique se pop_imputacao existe no seu ambiente)
-
-pop_total <- df_raw %>%
-  dplyr::select(ano, população)
-
-
-# 2. Join e cálculo para a série completa (Corrigido: nome do objeto e da coluna)
-serie_completa_tx <- serie_completa %>%
-  left_join(pop_total, by = "ano") %>%
-  mutate(tx_mortes_violentas = valor * 1e5 / população) # 'valor' é o nome que você deu no bind_rows
-
-# 3. Join e cálculo para o intervalo de confiança
-backcast_tx <- backcast_mv %>%
-  left_join(pop_total, by = "ano") %>%
-  mutate(
-    # Faltava calcular a taxa imputada pontual:
-    tx_mortes_violentas_imputado = mortes_violentas_imputado * 1e5 / população,
-    tx_lwr = mortes_violentas_lwr_95 * 1e5 / população,
-    tx_upr = mortes_violentas_upr_95 * 1e5 / população
-  )
-
-# 4. Gráfico de Taxas
-tx_ARIMAX <- ggplot() + 
-  geom_ribbon(data = backcast_tx,
-              aes(x = ano, ymin = tx_lwr, ymax = tx_upr),
-              fill = "gray80", alpha = 0.6) +
-  geom_line(data = serie_completa_tx,
-            aes(x = ano, y = tx_mortes_violentas, color = tipo), linewidth = 1) +
-  geom_vline(xintercept = 1978.5, linetype = "dashed") +
-  labs(title = "Taxa de mortes violentas: retropolação ARIMAX (1960–1978)",
-       subtitle = "Valores imputados com base no déficit educacional",
-       x = "ano", y = "taxa por 100 mil habitantes", color = "") +
-  theme_ipea(legend.position = "bottom") +
-  scale_color_ipea(palette = "Red-Blue-White") +
-  scale_fill_ipea(palette = "Red-Blue-White")
-
-
-print(tx_ARIMAX)
-
-
-# 1. Preparar dados do método SP (pontuais) para 1960–1978 e 1979–2022
-# ------------------------------------------------------------------------------
-
-
-
-# Criar série completa do método déficit ARIMAX
-deficit_mortes_violentas <- bind_rows(
-  # Período observado (1979–2022) – use os valores observados
-  obs_data %>% 
-    dplyr::select(ano, mortes_violentas_deficit = mortes_violentas) %>% 
-    mutate(tipo = "observado"),
-  # Período imputado (1960–1978) – use as imputações ARIMAX
-  backcast_mv %>% 
-    dplyr::select(ano, mortes_violentas_deficit = mortes_violentas_imputado) %>% 
-    mutate(tipo = "imputado")
-) %>%
-  left_join(
-    backcast_mv %>% 
-      dplyr::select(ano, lwr = mortes_violentas_lwr_95, upr = mortes_violentas_upr_95),
-    by = "ano"
-  )
-
-deficit_tx_mortes_violentas <- bind_rows(
-  
-  # Observado (correto)
-  serie_completa_tx %>% 
-    dplyr::filter(tipo == "observado") %>%
-    dplyr::select(ano, tx_deficit = tx_mortes_violentas) %>% 
-    mutate(tipo = "observado"),
-  
-  # Imputado
-  backcast_tx %>% 
-    dplyr::select(ano, tx_deficit = tx_mortes_violentas_imputado) %>% 
-    mutate(tipo = "imputado")
-  
-) %>%
-  left_join(
-    backcast_tx %>% 
-      dplyr::select(ano, lwr = tx_lwr, upr = tx_upr),
-    by = "ano"
-  )
-
-
-# População completa de df_raw (já imputada para anos sem censo)
-pop_completa <- df_raw %>% 
-  dplyr::select(ano, populacao_df = população)
-
-sp_mortes_violentas <- dados_1960_2022 %>%
-  dplyr::select(ano, mortes_violentas_sp = mortes_violentas) %>%
-  left_join(pop_completa, by = "ano") %>%
-  mutate(
-    tx_mortes_violentas_sp = (mortes_violentas_sp / populacao_df) * 1e5
-  ) %>%
-  dplyr::select(-populacao_df)
-
-# Em vez de sp_homicidios, use sp_mortes_violentas
-comparacao_numeros <- sp_mortes_violentas %>%
-  left_join(
-    deficit_mortes_violentas %>% 
-      dplyr::select(ano, mortes_violentas_deficit, lwr_mv = lwr, upr_mv = upr),
-    by = "ano"
-  )
-
-comparacao_taxas <- sp_mortes_violentas %>%
-  left_join(
-    deficit_tx_mortes_violentas %>% 
-      dplyr::select(ano, tx_mortes_violentas_deficit = tx_deficit, 
-                    lwr_tx = lwr, upr_tx = upr),
-    by = "ano"
-  )
-
-# 4. Gráficos comparativos
-# ------------------------------------------------------------------------------
-
-# 4.1 mortes violentas - número
-p_comp_mv <- ggplot() +
-  # Faixa de incerteza do método déficit (apenas para anos imputados)
-  geom_ribbon(
-    data = deficit_mortes_violentas %>% filter(tipo == "imputado"),
-    aes(x = ano, ymin = lwr, ymax = upr),
-    fill = "gray80", alpha = 0.5
-  ) +
-  # Linha do método SP
-  geom_line(
-    data = comparacao_numeros,
-    aes(x = ano, y = mortes_violentas_sp, color = "SP"),
-    linewidth = 1
-  ) +
-  # Linha do método déficit (mediana)
-  geom_line(
-    data = comparacao_numeros,
-    aes(x = ano, y = mortes_violentas_deficit, color = "Déficit"),
-    linewidth = 1
-  ) +
-  # Pontos observados (são os mesmos para ambos)
-  geom_point(
-    data = obs_data,
-    aes(x = ano, y = mortes_violentas),
-    size = 2, color = "black"
-  ) +
-  geom_vline(xintercept = 1978.5, linetype = "dashed", color = "gray50") +
-  annotate("text", x = 1978.5, y = Inf, label = "início SIM", 
-           hjust = 1.1, vjust = 2, linewidth = 3, angle = 90, color = "gray50") +
-  labs(
-    title = "Mortes violentas: comparação SP vs Déficit",
-    x = "Ano", y = "Número de mortes violentas", color = "Método"
-  ) +
-  theme_ipea(legend.position = "bottom") +
-  scale_color_manual(values = c("SP" = "black", "Déficit" = "red")) +
-  scale_x_continuous(breaks = seq(1960, 2020, by = 10))
-
-print(p_comp_mv)
-
-
-# 4.4 mortes violentas - taxa
-p_comp_tx_mv <- ggplot() +
-  geom_ribbon(data = deficit_tx_mortes_violentas %>% filter(tipo == "imputado"),
-              aes(x = ano, ymin = lwr, ymax = upr),
-              fill = "gray80", alpha = 0.5) +
-  geom_line(data = comparacao_taxas,
-            aes(x = ano, y = tx_mortes_violentas_sp, color = "SP"), linewidth = 1) +
-  geom_line(data = comparacao_taxas,
-            aes(x = ano, y = tx_mortes_violentas_deficit, color = "Déficit"), linewidth = 1) +
-  geom_point(data = deficit_tx_mortes_violentas %>% filter(tipo == "observado"),
-             aes(x = ano, y = tx_deficit), linewidth = 1.5, color = "black") +
-  geom_vline(xintercept = 1978.5, linetype = "dashed", color = "gray50") +
-  annotate("text", x = 1978.5, y = Inf, label = "início SIM", 
-           hjust = 1.1, vjust = 2, linewidth = 3, angle = 90, color = "gray50") +
-  labs(title = "Taxa de mortes violentas: imputação por SP vs por déficit específico",
-       x = "Ano", y = "Taxa por 100 mil hab.", color = "Método") +
-  theme_ipea(legend.position = "bottom") +
-  scale_color_manual(values = c("SP" = "black", "Déficit" = "red")) +
-  scale_x_continuous(breaks = seq(1960, 2020, by = 10))
-
-print(p_comp_tx_mv)
-
-
-# 5. Salvar os gráficos (opcional)
-# ------------------------------------------------------------------------------
-save_ipeaplot(p_comp_mv, "comparacao_mortes_violentas_numero",
-              path = pasta_saida, width = 10, height = 6, format = c("eps", "png"))
-save_ipeaplot(p_comp_tx_mv, "comparacao_mortes_violentas_taxa",
-              path = pasta_saida, width = 10, height = 6, format = c("eps", "png"))
-
-#Comparação quantitativa
-
-# ============================================
-# COMPARAÇÃO NUMÉRICA ENTRE MÉTODOS (1960–1978)
-# ============================================
-
-
-
-comparacao_1960_1978 <- comparacao_numeros %>%
-  dplyr::filter(ano >= 1960, ano <= 1978) %>%
-  mutate(
-    diff_abs = mortes_violentas_deficit - mortes_violentas_sp,
-    diff_pct = 100 * diff_abs / mortes_violentas_sp
-  )
-
-# 1. Soma total no período
-resumo_total <- comparacao_1960_1978 %>%
-  summarise(
-    total_sp = sum(mortes_violentas_sp, na.rm = TRUE),
-    total_deficit = sum(mortes_violentas_deficit, na.rm = TRUE),
-    diff_total = total_deficit - total_sp,
-    diff_pct_total = 100 * diff_total / total_sp
-  )
-
-print(resumo_total)
-
-
-#criar variável de período intercensal
-
-comparacao_periodos <- comparacao_numeros %>%
-  mutate(
-    periodo = case_when(
-      ano >= 1960 & ano < 1970 ~ "1960-1970",
-      ano >= 1970 & ano < 1980 ~ "1970-1980"
-    )
-  ) %>%
-  filter(!is.na(periodo))
-
-#Agregar por período
-# Totais
-resumo_total_periodos <- comparacao_periodos %>%
-  group_by(periodo) %>%
-  summarise(
-    sp_total = sum(mortes_violentas_sp, na.rm = TRUE),
-    deficit_total = sum(mortes_violentas_deficit, na.rm = TRUE),
-    diff_abs = deficit_total - sp_total,
-    diff_pct = 100 * diff_abs / sp_total,
-    .groups = "drop"
-  )
-
-print(resumo_total_periodos)
-
-# Médias
-resumo_media_periodos <- comparacao_periodos %>%
-  group_by(periodo) %>%
-  summarise(
-    sp_media = mean(mortes_violentas_sp, na.rm = TRUE),
-    deficit_media = mean(mortes_violentas_deficit, na.rm = TRUE),
-    diff_media = deficit_media - sp_media,
-    diff_pct = 100 * diff_media / sp_media,
-    .groups = "drop"
-  )  
-print(resumo_media_periodos)
-
-#Visualizar
-
-ggplot(resumo_total_periodos, aes(x = periodo)) +
-  geom_col(aes(y = sp_total, fill = "imput. por SP"), position = "dodge") +
-  geom_col(aes(y = deficit_total, fill = "imput. por déficit"), position = "dodge") +
-  labs(
-    title = "Mortes violentas por período intercensal",
-    x = "Período",
-    y = "Total de mortes",
-    fill = "Método"
-  ) +
-  theme_ipea() +
-  scale_color_ipea(palette = "Red-Blue-White") +
-  scale_fill_ipea(palette = "Red-Blue-White")
-
-ggplot(resumo_total_periodos, aes(x = periodo, y = diff_pct)) +
-  geom_col() +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(
-    title = "Diferença percentual entre métodos por período",
-    y = "% (imput. déficit vs SP)",
-    x = ""
-  ) +
-  theme_ipea() +
-  scale_color_ipea(palette = "Red-Blue-White") +
-  scale_fill_ipea(palette = "Red-Blue-White")
-
-
-sum(backcast_mv$mortes_violentas_imputado)
-
-#==================
-#PASTAS
-#==================
-pasta_saida <- file.path("aprofundamento")
-
-dir.create(pasta_saida, recursive = TRUE, showWarnings = FALSE)
-
 #=============================================================================
 # Acidentes de trabalho, repressão política e mortalidade por acidentes
 #=============================================================================
@@ -1913,7 +1479,7 @@ grafico_doc_trab <- ggplot(
     label.size = 0
   ) +
   labs(
-    title = "Mortes documentadas vs. óbitos em acidentes de trabalho",
+    title = "repressão política vs. acidentes letais",
     subtitle = "período 1970–1985",
     x = "mortes pela repressão política militar por 100k hab.",
     y = "mortes por 100k trabalhadores"
@@ -1955,7 +1521,7 @@ grafico_doc_trab_ac <- ggplot(
     label.size = 0
   ) +
   labs(
-    title = "assassinatos políticos vs. acidentes de trabalho",
+    title = "repressão política vs. acidentes",
     subtitle = "período 1968–1985",
     x = "mortes pela repressão política militar por 100k hab.",
     y = "sinistros por 100k trabalhadores"
@@ -1966,7 +1532,10 @@ grafico_doc_trab_ac <- ggplot(
 
 print(grafico_doc_trab_ac)
 
-grafico_doc_trab/grafico_doc_trab_ac
+repressao_mortes_acidentes_trabalho <- grafico_doc_trab+grafico_doc_trab_ac
+
+print(repressao_mortes_acidentes_trabalho)
+
 
 # =============================================================================
 # Migração como explicação alternativa dos déficits populacionais
@@ -1998,6 +1567,8 @@ migracao_participacao <- tibble::tribble(
   "1951–1960",      3.4,
   "1961–1970",      0.9
 )
+
+
 
 #LEVY, M. S. F.. O papel da migração internacional na evolução da população brasileira (1872 a 1972). Revista de Saúde Pública, v. 8, p. 49–90, jun. 1974. https://doi.org/10.1590/S0034-89101974000500003 
 entradas_imigrantes_decada <- tibble::tribble(
@@ -2051,11 +1622,11 @@ migracao_censo <- tibble::tribble(
 migracao_ano <- tibble(ano = 1950:1991) |>
   left_join(migracao_censo, by = "ano") |>
   mutate(
-    perc_imigrantes = approx(
+    perc_imigrantes = spline(
       x = migracao_censo$ano,
       y = migracao_censo$perc_imigrantes,
       xout = ano,
-      rule = 2
+      method = "natural"
     )$y
   )
 
@@ -2210,7 +1781,7 @@ grafico_diferenca_saldo <- ggplot(diferenca_saldo, aes(x = as.factor(decada))) +
   theme_ipea(legend.position = "bottom") +
   theme(axis.text.x = element_text(angle = 0, hjust = 0.5))
 
-grafico_diferenca_saldo
+print(grafico_diferenca_saldo)
 
 # 5. Gráfico da diferença percentual
 grafico_diferenca_percentual <- ggplot(diferenca_saldo, aes(x = as.factor(decada))) +
@@ -2242,7 +1813,7 @@ grafico_combinado <- grafico_diferenca_saldo / grafico_diferenca_percentual +
     subtitle = "Comparação com a década de 1960 (referência)"
   )
 
-grafico_combinado
+print(grafico_combinado)
 
 # 7. Salvar os gráficos
 pasta_saida_migracao <- file.path("analise_migracao")
@@ -2301,7 +1872,7 @@ grafico_impacto_acumulado <- ggplot(impacto_acumulado, aes(x = decada)) +
   ) +
   theme_ipea()
 
-grafico_impacto_acumulado
+print(grafico_impacto_acumulado)
 
 # 10. Salvar resultados em CSV
 write.csv(diferenca_saldo,
@@ -2368,7 +1939,7 @@ emigracao_decada <- saldo_migratorio_decada |>
 
 # 3. Encontrar valores da década de 1960 para referência
 valores_1960 <- emigracao_decada |>
-  filter(decada == 1950) |>
+  filter(decada == 1960) |>
   summarise(
     saldo_1960 = first(saldo_migratorio),
     imigracao_1960 = first(imigrantes_decada),
@@ -2655,6 +2226,8 @@ deficit_por_coorte <- deficit_total |>
     deficit_pessoas_ano = sum(deficit, na.rm = TRUE),
     .groups = "drop"
   )
+
+sum(deficit_por_coorte$deficit_pessoas_ano)
 
 pessoas_unicas_coorte <- deficit_por_coorte |>
   left_join(coortes_info, by = "coorte") |>
@@ -2965,7 +2538,8 @@ dados_impacto_regime <- deficits_relativos |>
     by = "ano"
   ) |>
   # Remover NAs caso haja anos sem dados na base crua
-  drop_na(regime_militar, tempo, taxa_deficit_media)
+  drop_na(regime_militar, tempo, taxa_deficit_media) |>
+  filter(ano > 1959)
 
 
 
@@ -3096,7 +2670,7 @@ print(grafico_adultos)
 #---------------------------------------------
 # Gráfico 4: crianças de 10 a 14 anos
 #---------------------------------------------
-dados_criancas <- dados_plot %>% filter(faixa_idade == "10-14")
+dados_criancas <- dados_plot %>% filter(faixa_idade == "0-14")
 
 grafico_criancas <- ggplot(dados_criancas, aes(x = ano, y = taxa_deficit_media)) +
   geom_point(alpha = 0.5, size = 2.5) +
@@ -3118,10 +2692,10 @@ print(grafico_criancas)
 
 # Filtrar apenas as idades desejadas
 dados_filtrados <- dados_plot %>% 
-  filter(faixa_idade %in% c("15-29", "30-49", "50-69"))
+  filter(faixa_idade %in% c("15-29", "30-49", "50-69", "0-14"))
 
 # Criar o gráfico com facet_wrap
-ggplot(dados_filtrados, aes(x = ano, y = taxa_deficit_media)) +
+sintese_idades_regime <- ggplot(dados_filtrados, aes(x = ano, y = taxa_deficit_media)) +
   geom_point(alpha = 0.5, size = 2) +
   geom_smooth(aes(color = regime_f, group = regime_f), 
               method = "lm", se = TRUE, linewidth = 1) +
@@ -3140,6 +2714,8 @@ ggplot(dados_filtrados, aes(x = ano, y = taxa_deficit_media)) +
     color = "Período"
   ) +
   theme_ipea(legend.position = "bottom")
+
+print(sintese_idades_regime)
 
 #=====================================================================================
 # Migração
@@ -3202,31 +2778,9 @@ fecundidade_anual <- fecundidade_decada |>
   arrange(ano) |>
   mutate(
     # Interpolação Log-Linear: aproximamos o log e depois desfazemos com exp
-    tft_interp = exp(approx(ano, log(tft), xout = ano)$y)
+    tft_interp = exp(spline(ano, log(tft), xout = ano, method = "natural")$y)
   )
 
-plot(x = fecundidade_anual$ano, y = fecundidade_anual$tft_interp, type = "line", xlab = "ano", ylab = "taxa de fecundidade")
-
-# 2. Ajuste na Função de Janela Fixa (10 anos)
-# Agora com o divisor calibrado e janela de 10 anos rigorosa
-calcular_mortalidade_janela_robusta <- function(ano_censo, df, divisor = 31) {
-  
-  # Pegamos exatamente os 10 anos anteriores ao censo (ex: 1971 a 1980)
-  janela <- df |> 
-    filter(ano <= ano_censo & ano > (ano_censo - 10))
-  
-  # Estimativa de nascimentos com a nova TFT exponencial
-  nascimentos_estimados <- sum((janela$tft_interp / divisor) * janela$mulheres_15_49, na.rm = TRUE)
-  
-  # População real 0-9 observada no censo
-  pop_real <- df |> 
-    filter(ano == ano_censo) |> 
-    mutate(pop_0_9 = `homens 0 a 4 anos` + `homens 5 a 9 anos` + 
-             `mulheres 0 a 4 anos` + `mulheres 5 a 9 anos`) |>
-    pull(pop_0_9)
-  
-  return(1 - (pop_real / nascimentos_estimados))
-}
 
 # 2. Integrar com sua base de impacto
 dados_completos <- dados_impacto_regime |>
@@ -3250,7 +2804,7 @@ fecundidade_anual <- tibble::tribble(
 ) |>
   full_join(tibble(ano = 1940:2022), by = "ano") |>
   arrange(ano) |>
-  mutate(tft_interp = approx(ano, tft, xout = ano)$y)
+  mutate(tft_interp = spline(ano, tft, xout = ano, method = "natural")$y)
 
 # 2. Calcular a Mulheres em Idade Reprodutiva (15-49)
 df_nascimentos <- df_raw |>
@@ -3275,6 +2829,7 @@ nascimentos_por_periodo <- df_nascimentos |>
   arrange(ano) |>
   mutate(
     periodo_censo = case_when(
+      ano > 1940 & ano <= 1950 ~1940,
       ano > 1950 & ano <= 1960 ~ 1950,
       ano > 1960 & ano <= 1970 ~ 1960,
       ano > 1970 & ano <= 1980 ~ 1970,
@@ -3315,27 +2870,6 @@ analise_final_infantil <- nascimentos_por_periodo |>
 
 # Visualizar o resultado
 print(analise_final_infantil)
-
-# ==============================================================================
-# 1. PREPARAÇÃO DOS NASCIMENTOS (JANELA FIXA DE 10 ANOS)
-# ==============================================================================
-
-# Função para calcular a mortalidade de uma janela de 10 anos retroativos
-calcular_mortalidade_janela <- function(ano_censo, df, divisor = 31) {
-  # Seleciona apenas os 10 anos que compõem a coorte 0-9 do censo
-  janela_nascimentos <- df |> 
-    filter(ano <= ano_censo & ano > (ano_censo - 10)) |>
-    summarise(total_nascidos = sum((tft_interp / divisor) * mulheres_15_49, na.rm = TRUE)) |>
-    pull(total_nascidos)
-  
-  pop_real <- df |> 
-    filter(ano == ano_censo) |> 
-    mutate(pop_0_9 = `homens 0 a 4 anos` + `homens 5 a 9 anos` + 
-             `mulheres 0 a 4 anos` + `mulheres 5 a 9 anos`) |>
-    pull(pop_0_9)
-  
-  return(1 - (pop_real / janela_nascimentos))
-}
 
 
 # ==============================================================================
@@ -3395,7 +2929,7 @@ calcular_mortalidade_hibrida_spline <- function(ano_censo, df, divisor_media = 3
 # ==============================================================================
 
 set.seed(42)
-anos_censo <- c(1960, 1970, 1980, 1991, 2000, 2010, 2022)
+anos_censo <- c(1950, 1960, 1970, 1980, 1991, 2000, 2010, 2022)
 
 resultados_bootstrap_hibrido <- map_df(anos_censo, function(a) {
   reps <- replicate(1000, {
@@ -3409,13 +2943,9 @@ resultados_bootstrap_hibrido <- map_df(anos_censo, function(a) {
     mortalidade_ponto = mean(reps) * 100,
     ic_inf = quantile(reps, 0.025) * 100,
     ic_sup = quantile(reps, 0.975) * 100,
-    regime = ifelse(a %in% c(1960, 1970), "Regime Militar", "Democracia")
+    regime = ifelse(a %in% c(1970, 1980), "Regime Militar", "Democracia")
   )
 })
-
-# ==============================================================================
-# 3. GRÁFICO FINAL DE MORTALIDADE OCULTA
-# ==============================================================================
 
 # ==============================================================================
 # CONTRAFACTUAL PARA MORTALIDADE INFANTIL (0-9 ANOS) – INTERPOLAÇÃO EXPONENCIAL
@@ -3527,7 +3057,9 @@ grafico_final_hibrido_com_contra <- ggplot() +
     fill = "Período",
     caption = "Faixa azul: IC 95% da linha contrafactual (bootstrap)."
   ) +
-  tema_final
+  theme_ipea() +
+  scale_color_ipea(palette = "Red-Blue-White") +
+  scale_fill_ipea(palette = "Red-Blue-White")
 
 # Exibir
 print(grafico_final_hibrido_com_contra)
@@ -3591,6 +3123,165 @@ save_ipeaplot(grafico_fecundidade, "fecundidade_regime",
               path = pasta_saida, format = c("eps", "png"))
 
 
+# ==============================================================================
+# REGRESSÃO SEGMENTADA (SIMPLES): MORTALIDADE IMPLÍCITA NA INFÂNCIA (0‑9)
+# ==============================================================================
+# Modelo: mortalidade ~ ano + regime + ano:regime
+#   - regime = 1 para 1964-1985, 0 caso contrário
+#   - interação captura a mudança de tendência durante o regime
+# ==============================================================================
+
+library(tidyverse)
+library(ggplot2)
+
+# ------------------------------------------------------------------------------
+# 1. PREPARAR DADOS (supondo que `resultados_bootstrap_hibrido` existe)
+# ------------------------------------------------------------------------------
+
+# Se você já tem uma série anual interpolada, use-a; caso contrário, interpole
+dados_censo <- resultados_bootstrap_hibrido %>%
+  select(ano, mortalidade = mortalidade_ponto, 
+         lwr = ic_inf, upr = ic_sup)
+
+# Interpolação log-linear para série anual (exponencial)
+anos_completos <- tibble(ano = 1940:2022)
+
+serie_anual <- dados_censo %>%
+  mutate(log_mort = log(mortalidade)) %>%
+  right_join(anos_completos, by = "ano") %>%
+  arrange(ano) %>%
+  mutate(
+    log_mort_interp = spline(x = ano, y = log_mort, xout = ano, method = "natural")$y,
+    mortalidade_anual = exp(log_mort_interp),
+    lwr_interp = spline(x = ano, y = lwr, xout = ano, method = "natural")$y,
+    upr_interp = spline(x = ano, y = upr, xout = ano, method = "natural")$y
+  ) %>%
+  select(ano, mortalidade = mortalidade_anual, 
+         lwr = lwr_interp, upr = upr_interp) %>%
+  filter(ano >= 1950)
+
+# ------------------------------------------------------------------------------
+# 2. CRIAR VARIÁVEIS DO MODELO
+# ------------------------------------------------------------------------------
+
+dados_reg <- serie_anual %>%
+  mutate(
+    regime = ifelse(ano >= 1964 & ano <= 1985, 1, 0),
+    periodo = case_when(
+      ano < 1964 ~ "Pré-regime",
+      ano >= 1964 & ano <= 1985 ~ "Regime",
+      ano > 1985 ~ "Pós-regime"
+    ),
+    periodo = factor(periodo, levels = c("Pré-regime", "Regime", "Pós-regime"))
+  )
+
+# ------------------------------------------------------------------------------
+# 3. AJUSTAR MODELO COM INTERAÇÃO SIMPLES
+# ------------------------------------------------------------------------------
+
+modelo <- lm(log(mortalidade) ~ ano + regime + ano:regime, data = dados_reg)
+
+summary(modelo)
+
+
+# ------------------------------------------------------------------------------
+# 4. PREVER PARA O GRÁFICO
+# ------------------------------------------------------------------------------
+
+
+# Grade de anos para previsão
+anos_pred <- tibble(ano = seq(1950, 2022, by = 1)) %>%
+  mutate(
+    regime = ifelse(ano >= 1964 & ano <= 1985, 1, 0),
+    periodo = case_when(
+      ano < 1964 ~ "Pré-regime",
+      ano >= 1964 & ano <= 1985 ~ "Regime",
+      ano > 1985 ~ "Pós-regime"
+    ),
+    periodo = factor(periodo, levels = c("Pré-regime", "Regime", "Pós-regime"))
+  )
+
+# Previsões com intervalo de confiança (95%)
+pred <- exp(predict(modelo, newdata = anos_pred, interval = "confidence", level = 0.95))
+
+# Verificar estrutura (opcional)
+# str(pred)  # deve mostrar uma matriz com 3 colunas
+
+# Converter para data.frame para facilitar a extração
+pred_df <- as.data.frame(pred)
+
+# Adicionar ao data.frame
+anos_pred <- anos_pred %>%
+  mutate(
+    pred = pred_df$fit,
+    lwr_pred = pred_df$lwr,
+    upr_pred = pred_df$upr
+  ) %>%
+  # Garantir que os limites não fiquem negativos
+  mutate(across(c(lwr_pred, upr_pred), ~pmax(., 0)))
+
+# ------------------------------------------------------------------------------
+# 5. GRÁFICO
+# ------------------------------------------------------------------------------
+
+cores_periodo <- c("Pré-regime" = "#1f77b4", 
+                   "Regime" = "#d62728", 
+                   "Pós-regime" = "#2ca02c")
+
+max_mort <- max(dados_reg$mortalidade, na.rm = TRUE)
+
+regime_mort_infancia <- ggplot() +
+  # Faixa de incerteza da previsão (somente para a reta do modelo)
+  geom_ribbon(data = anos_pred,
+              aes(x = ano, ymin = lwr_pred, ymax = upr_pred),
+              fill = "gray70", alpha = 0.3) +
+  # Reta ajustada (linha única para todo o período, com segmentos coloridos)
+  geom_line(data = anos_pred,
+            aes(x = ano, y = pred, color = periodo),
+            linewidth = 1.2) +
+  # Pontos observados com IC
+  geom_point(data = dados_reg,
+             aes(x = ano, y = mortalidade),
+             size = 2, color = "black") +
+  geom_errorbar(data = dados_reg,
+                aes(x = ano, ymin = lwr, ymax = upr),
+                width = 0.5, color = "gray50", alpha = 0.6) +
+  # Linhas verticais: golpe (1964) e abertura (1985)
+  geom_vline(xintercept = c(1964, 1985), linetype = "dashed", color = "gray40") +
+  # Anotações
+  annotate("text", x = 1962, y = max_mort * 0.95, 
+           label = "Pré-regime", color = "#1f77b4", size = 4, hjust = 0.5) +
+  annotate("text", x = 1974, y = max_mort * 0.95, 
+           label = "Regime", color = "#d62728", size = 4, hjust = 0.5) +
+  annotate("text", x = 1995, y = max_mort * 0.95, 
+           label = "Pós-regime", color = "#2ca02c", size = 4, hjust = 0.5) +
+  # Escalas e rótulos
+  scale_x_continuous(breaks = seq(1960, 2020, by = 10)) +
+  scale_y_continuous(labels = scales::percent_format(scale = 1, accuracy = 0.1),
+                     limits = c(0, NA)) +
+  scale_color_manual(values = cores_periodo) +
+  labs(
+    title = "Mortalidade implícita na infância (0-9 anos)",
+    subtitle = "Regressão com interação ano × regime (1964-1985)",
+    x = "Ano", y = "Mortalidade acumulada na década (%)",
+    color = "Período"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "gray70", fill = NA, linewidth = 0.5),
+    axis.line = element_line(color = "black", linewidth = 0.3),
+    axis.ticks = element_line(color = "black"),
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5)
+  )
+
+print(regime_mort_infancia)
+
+save_ipeaplot(regime_mort_infancia, "regressão regime infancia", format = c("png", "eps"))
+
 #=======================================================================
 # Os excessos estimados de homicídios e outras mortes violentas explicam o déficit?
 # Déficit de sobrevivência específico jovem-masculino
@@ -3617,7 +3308,7 @@ deficit_jovem <- analysis_data %>% select(ano, espec_deficit)
 dados_reg <- dados_1960_2022 %>%
   select(ano, starts_with("excesso_homicidios_cf"), starts_with("excesso_mce_cf")) %>%
   left_join(deficit_jovem, by = "ano") %>%
-  filter(ano >= 1964 & ano <= 1985)  # período do regime (opcional, mas recomendado)
+  filter(ano >= 1960 & ano <= 1991)  # período do regime (opcional, mas recomendado)
 
 # Verificar nomes
 names(dados_reg)
@@ -3750,7 +3441,7 @@ grafico_reg_facetado <- ggplot(dados_com_stats, aes(x = excesso, y = espec_defic
   facet_wrap(~ rotulo, scales = "free", ncol = 4) +
   labs(
     title = "Déficit específico masculino (15-29 anos) vs. excesso de mortes violentas",
-    subtitle = "Regressões lineares por cenário contrafactual – período 1964-1985",
+    subtitle = "Regressões lineares por cenário contrafactual – período 1960-1991",
     x = "Excesso de mortes (nº de vítimas)",
     y = "Déficit (pessoas-ano)"
   ) +
@@ -3765,6 +3456,10 @@ grafico_reg_facetado <- ggplot(dados_com_stats, aes(x = excesso, y = espec_defic
   scale_y_continuous(labels = scales::comma)
 
 print(grafico_reg_facetado)
+
+save_ipeaplot(grafico_reg_facetado,
+              "excessos de mortes violentas vs déficit de sobrevivência",
+              format = c("eps", "png"))
 
 # ==============================================================================
 # GRÁFICO DE COORTES: TAXA DE DÉFICIT POR SEXO (HOMENS E MULHERES)
@@ -3818,571 +3513,520 @@ print(grafico_coortes_sexo)
 # Salvar (opcional)
 save_ipeaplot(grafico_coortes_sexo, "coortes_deficit_sexo", path = pasta_saida, format = c("eps", "png"))
 
-# ==============================================================================
-# BACKCASTING EXPANDIDO DE MORTES VIOLENTAS (1950-1978)
-# ==============================================================================
-# Este script pressupõe que os seguintes objetos já existem no ambiente:
-#   - dados_1960_2022 : data.frame com colunas: ano, homicidios_intencionais_rand_media,
-#                       MCE, mortes_violentas, população (e outras)
-#   - analysis_data   : data.frame com colunas: ano, espec_deficit, mortes_violentas, ...
-#   - deficits_relativos : data.frame com colunas: ano, faixa_idade, sexo, taxa_deficit, ...
-# ==============================================================================
 
-library(tidyverse)
-library(forecast)
-library(tseries)
-library(ggplot2)
-library(patchwork)
-library(ipeaplot)
+#==============================================================================
+# RETROPOLAÇÃO ARIMAX COM BOOTSTRAP EM BLOCOS (BACKCASTING)
+#==============================================================================
 
 # ------------------------------------------------------------------------------
-# 1. PREPARAÇÃO DOS DADOS
+# 1. PREPARAR DADOS OBSERVADOS (1979-2022)
 # ------------------------------------------------------------------------------
 
-# Séries observadas de mortalidade violenta (1979-2022)
-df_obs <- dados_1960_2022 %>%
-  filter(ano >= 1979) %>%
-  select(ano,
-         homicidios = homicidios_intencionais_rand_media,
-         mce = MCE,
-         mortes_violentas = mortes_violentas) %>%
-  pivot_longer(cols = -ano, names_to = "tipo", values_to = "obs")
+# Assumindo que obs_data e analysis_data já existem
+# obs_data contém as séries observadas de mortes violentas e o déficit específico
 
-# Preditores
-# (a) Déficit específico masculino (15-29) em pessoas-ano
-pred1 <- analysis_data %>%
-  select(ano, espec_deficit)
+# Inverter a ordem dos dados observados para o modelo (passado <- presente)
+obs_rev <- obs_data %>% arrange(desc(ano))
 
-# (b) Mortalidade implícita de homens 15-29 (taxa de déficit relativo)
-#    Extrair de deficits_relativos: média anual da taxa_deficit para homens 15-29
-pred2 <- deficits_relativos %>%
-  filter(sexo == "homens", faixa_idade == "15-29") %>%
-  group_by(ano) %>%
-  summarise(mort_impl_media = mean(taxa_deficit, na.rm = TRUE) / 100, .groups = "drop") %>%
-  # Preencher anos sem dados (antes de 1960) com o primeiro valor disponível (1960)
-  complete(ano = 1950:2022) %>%
-  mutate(mort_impl_media = ifelse(is.na(mort_impl_media), 
-                                  first(na.omit(mort_impl_media)), 
-                                  mort_impl_media))
-
-# Combinar preditores em um único data.frame
-preditores <- pred1 %>%
-  left_join(pred2, by = "ano") %>%
-  # Para backcasting, precisamos de valores para 1950-1978
-  filter(ano >= 1950)
+# Criar séries temporais invertidas
+y_rev <- ts(obs_rev$mortes_violentas, frequency = 1)
+x_rev <- ts(obs_rev$espec_deficit, frequency = 1)
 
 # ------------------------------------------------------------------------------
-# 2. FUNÇÃO PARA BACKCASTING ARIMAX
+# 2. AJUSTAR MODELO ARIMAX NOS DADOS ORIGINAIS (INVERTIDOS)
 # ------------------------------------------------------------------------------
 
-backcast_arimax <- function(y_obs, x_pred, transform = "linear", h = NULL) {
-  anos_ajuste <- 1979:2022
-  anos_previsao <- 1950:1978
-  if (is.null(h)) h <- length(anos_previsao)
+fit_rev <- auto.arima(y_rev, xreg = x_rev, stepwise = FALSE, approximation = FALSE)
+
+# Diagnóstico (opcional)
+checkresiduals(fit_rev)
+test_lb <- Box.test(residuals(fit_rev), type = "Ljung-Box")
+print(test_lb)
+
+# ------------------------------------------------------------------------------
+# 3. BOOTSTRAP EM BLOCOS PARA INTERVALOS DE CONFIANÇA DO BACKCASTING
+# ------------------------------------------------------------------------------
+
+# Definir parâmetros do bootstrap
+nboot <- 1000          # número de replicações bootstrap
+block_size <- 5         # tamanho do bloco (para séries anuais, 5 anos preserva ciclos)
+h <- 29                 # número de anos a retroceder (1940-1978)
+
+# Obter resíduos e valores ajustados na ordem cronológica original (1979-2022)
+resid_orig <- rev(residuals(fit_rev))   # resíduos na ordem cronológica
+fitted_orig <- rev(fitted(fit_rev))     # valores ajustados na ordem cronológica
+n <- length(y_rev)                      # número de observações (44)
+
+# Preparar matriz para armazenar as previsões bootstrap (h x nboot)
+boot_pred <- matrix(NA, nrow = h, ncol = nboot)
+
+# Preparar regressores para backcasting (1950-1978) na ordem invertida
+pred_years <- 1950:1978
+pred_data <- analysis_data %>%
+  filter(ano %in% pred_years) %>%
+  dplyr::select(ano, espec_deficit)
+
+pred_rev <- pred_data %>% arrange(desc(ano))
+x_pred_rev <- ts(pred_rev$espec_deficit, frequency = 1)
+
+# Loop de bootstrap
+set.seed(123)  # para reprodutibilidade
+
+for (b in 1:nboot) {
+  # Reamostrar blocos de resíduos (com reposição)
+  n_blocks <- ceiling(n / block_size)
+  block_starts <- sample(1:(n - block_size + 1), size = n_blocks, replace = TRUE)
   
-  idx_ajuste <- which(x_pred$ano %in% anos_ajuste)
-  idx_previsao <- which(x_pred$ano %in% anos_previsao)
+  boot_resid <- unlist(lapply(block_starts, function(start) {
+    resid_orig[start:(start + block_size - 1)]
+  }))
+  # Cortar para o comprimento original
+  boot_resid <- boot_resid[1:n]
   
-  y <- y_obs
-  x <- x_pred$valor[idx_ajuste]
-  x_new <- x_pred$valor[idx_previsao]
+  # Construir série bootstrap: ajustado + resíduos bootstrap
+  y_boot <- fitted_orig + boot_resid
   
-  if (transform == "log") {
-    y <- log(y)
-    x <- log(x)
-    x_new <- log(x_new)
+  # Inverter a série bootstrap (presente -> passado)
+  y_boot_rev <- ts(rev(y_boot), frequency = 1)
+  
+  # Reajustar o modelo ARIMAX com os mesmos regressores
+  fit_boot <- tryCatch(
+    auto.arima(y_boot_rev, xreg = x_rev, stepwise = FALSE, approximation = FALSE),
+    error = function(e) {
+      warning("Falha no ajuste bootstrap ", b, ". Usando modelo original.")
+      return(fit_rev)  # fallback para o modelo original
+    }
+  )
+  
+  # Garantir que o modelo inclua o regressor (caso o auto.arima o tenha descartado)
+  if (!"xreg" %in% names(fit_boot$call) || is.null(fit_boot$xreg)) {
+    # Reajustar com Arima forçando o regressor
+    fit_boot <- Arima(y_boot_rev, order = fit_boot$arma[c(1,6,2)], 
+                      xreg = x_rev, include.mean = TRUE)
   }
   
-  y_rev <- ts(rev(y), frequency = 1)
-  x_rev <- ts(rev(x), frequency = 1)
+  # Fazer a previsão para trás (backcasting)
+  pred_rev <- forecast::forecast(fit_boot, xreg = x_pred_rev, h = h)
   
-  fit <- auto.arima(y_rev, xreg = x_rev, stepwise = FALSE, approximation = FALSE)
+  # Desinverter a previsão (voltar para ordem cronológica 1940-1978)
+  pred_mean_rev <- rev(as.numeric(pred_rev$mean))
   
-  x_new_rev <- ts(rev(x_new), frequency = 1)
-  pred_rev <- forecast::forecast(fit, xreg = x_new_rev, h = h)
-  
-  pred_mean <- rev(as.numeric(pred_rev$mean))
-  pred_lwr  <- rev(as.numeric(pred_rev$lower[, 2]))
-  pred_upr  <- rev(as.numeric(pred_rev$upper[, 2]))
-  
-  if (transform == "log") {
-    sigma2 <- fit$sigma2
-    pred_mean <- exp(pred_mean + sigma2/2)
-    pred_lwr <- exp(pred_lwr)
-    pred_upr <- exp(pred_upr)
-    
-    # ---- GARANTIR QUE LWR <= UPR ----
-    temp_lwr <- pmin(pred_lwr, pred_upr)
-    temp_upr <- pmax(pred_lwr, pred_upr)
-    pred_lwr <- temp_lwr
-    pred_upr <- temp_upr
-  }  
-  # ---- CORREÇÃO: substitui Inf por NA ----
-  pred_mean[is.infinite(pred_mean)] <- NA
-  pred_lwr[is.infinite(pred_lwr)] <- NA
-  pred_upr[is.infinite(pred_upr)] <- NA
-  
-  
-  tibble(
-    ano = anos_previsao,
-    estimado = pred_mean,
-    lwr = pred_lwr,
-    upr = pred_upr
-  )
+  # Armazenar na matriz
+  boot_pred[, b] <- pred_mean_rev
 }
+
 # ------------------------------------------------------------------------------
-# 3. APLICAR PARA TODAS AS COMBINAÇÕES
+# 4. CALCULAR ESTATÍSTICAS A PARTIR DA DISTRIBUIÇÃO BOOTSTRAP
 # ------------------------------------------------------------------------------
 
-# Definir combinações
-tipos <- c("homicidios", "mce", "mortes_violentas")
-transformacoes <- c("linear", "log")
-preditores_lista <- list(
-  "deficit_especifico" = list(var = "espec_deficit", label = "Déficit específico masculino"),
-  "mort_implicita" = list(var = "mort_impl_media", label = "Mortalidade implícita (homens 15-29)")
+# Estimativa pontual (mediana) e intervalos de confiança (percentis 2.5% e 97.5%)
+backcast_median <- apply(boot_pred, 1, median, na.rm = TRUE)
+backcast_lwr <- apply(boot_pred, 1, quantile, probs = 0.025, na.rm = TRUE)
+backcast_upr <- apply(boot_pred, 1, quantile, probs = 0.975, na.rm = TRUE)
+
+# Organizar resultados em data.frame com a ordem cronológica
+backcast_mv <- data.frame(
+  ano = pred_years,
+  mortes_violentas_imputado = backcast_median,
+  mortes_violentas_lwr_95 = backcast_lwr,
+  mortes_violentas_upr_95 = backcast_upr
 )
 
-# Armazenar resultados
-resultados_backcast <- list()
-
-for (tipo in tipos) {
-  for (trans in transformacoes) {
-    for (pred_nome in names(preditores_lista)) {
-      
-      cat("Processando:", tipo, trans, pred_nome, "\n")
-      
-      # Extrair série observada (1979-2022)
-      y_obs <- df_obs %>% filter(tipo == !!tipo) %>% pull(obs)
-      
-      # Extrair preditor para todo o período
-      x_pred <- preditores %>%
-        select(ano, valor = !!sym(preditores_lista[[pred_nome]]$var))
-      
-      # Fazer backcasting
-      res <- backcast_arimax(y_obs, x_pred, transform = trans)
-      
-      # Guardar com identificadores
-      res <- res %>%
-        mutate(
-          tipo = tipo,
-          transformacao = trans,
-          preditor = pred_nome
-        )
-      
-      resultados_backcast <- bind_rows(resultados_backcast, res)
-    }
-  }
-}
-
-
 # ------------------------------------------------------------------------------
-# 4. MONTAR SÉRIE COMPLETA (OBSERVADO + ESTIMADO) COM PREENCHIMENTO ROBUSTO
+# 5. UNIFICAR SÉRIE COMPLETA (OBSERVADO + IMPUTADO) PARA VISUALIZAÇÃO
 # ------------------------------------------------------------------------------
 
-# Observados: criar um data.frame com todas as combinações de preditor para os anos observados
-obs_expandido <- df_obs %>%
-  # Duplicar para cada combinação de transformação e preditor imputado
-  expand_grid(
-    transformacao = c("linear", "log"),
-    preditor = c("deficit_especifico", "mort_implicita")
-  ) %>%
-  # Adicionar também o preditor "observado" (apenas linear)
-  bind_rows(
-    df_obs %>%
-      mutate(transformacao = "linear", preditor = "observado")
-  ) %>%
-  rename(estimado = obs) %>%
-  mutate(lwr = NA, upr = NA)
+serie_completa <- bind_rows(
+  obs_data %>% dplyr::select(ano, valor = mortes_violentas) %>% mutate(tipo = "observado"),
+  backcast_mv %>% dplyr::select(ano, valor = mortes_violentas_imputado) %>% mutate(tipo = "imputado")
+)
 
-# Combinar com estimativas (backcast)
-serie_completa <- resultados_backcast %>%
-  bind_rows(obs_expandido) %>%
-  arrange(ano, tipo, transformacao, preditor)
+# ------------------------------------------------------------------------------
+# 7. CÁLCULO DAS TAXAS POR 100 MIL HABITANTES
+# ------------------------------------------------------------------------------
 
-# Agora, para cada combinação (ano, tipo, transformacao), se houver observado, garantir que todos os preditores tenham esse valor
-serie_completa <- serie_completa %>%
-  group_by(ano, tipo, transformacao) %>%
+# População total (já interpolada no df_raw)
+pop_total <- df_raw %>% dplyr::select(ano, população)
+
+# Série completa com taxas
+serie_completa_tx <- serie_completa %>%
+  left_join(pop_total, by = "ano") %>%
+  mutate(tx_mortes_violentas = valor * 1e5 / população)
+
+# Backcast com taxas
+backcast_tx <- backcast_mv %>%
+  left_join(pop_total, by = "ano") %>%
   mutate(
-    # Se existe um valor observado neste grupo, pegue-o
-    obs_val = ifelse(any(preditor == "observado"), 
-                     estimado[preditor == "observado"][1], 
-                     NA)
-  ) %>%
-  ungroup() %>%
-  # Substituir NAs nos preditores imputados pelo valor observado, quando disponível
-  mutate(
-    estimado = ifelse(
-      is.na(estimado) & !is.na(obs_val) & preditor != "observado",
-      obs_val,
-      estimado
-    ),
-    lwr = ifelse(
-      is.na(lwr) & !is.na(obs_val) & preditor != "observado",
-      NA,  # não há intervalo para observado
-      lwr
-    ),
-    upr = ifelse(
-      is.na(upr) & !is.na(obs_val) & preditor != "observado",
-      NA,
-      upr
-    )
-  ) %>%
-  select(-obs_val)# ------------------------------------------------------------------------------
-# 5. GRÁFICOS
-# ------------------------------------------------------------------------------
-
-# Função para criar gráfico para um dado preditor e transformação
-plot_backcast <- function(df, pred_nome, trans_nome) {
-  df_filt <- df %>%
-    filter(preditor %in% c(pred_nome, "observado"),
-           transformacao == trans_nome)
-  
-  df_obs <- df_filt %>% filter(preditor == "observado")
-  df_est <- df_filt %>% filter(preditor == pred_nome)
-  
-  # Paleta manual para os três tipos
-  cores_tipo <- c("homicidios" = "#D62728", 
-                  "mce" = "#1F77B4", 
-                  "mortes_violentas" = "#2CA02C")
-  
-  ggplot() +
-    geom_ribbon(data = df_est, 
-                aes(x = ano, ymin = lwr, ymax = upr, fill = tipo), alpha = 0.2) +
-    geom_line(data = df_est, 
-              aes(x = ano, y = estimado, color = tipo), 
-              linewidth = 0.8, linetype = "dashed") +   # size → linewidth
-    geom_line(data = df_obs, 
-              aes(x = ano, y = estimado, color = tipo), 
-              linewidth = 1) +                          # size → linewidth
-    geom_vline(xintercept = 1978.5, linetype = "dotted", color = "gray40") +
-    labs(
-      title = paste("Backcasting de mortes violentas -", 
-                    ifelse(trans_nome == "linear", "linear", "log")),
-      subtitle = paste("Preditor:", 
-                       ifelse(pred_nome == "deficit_especifico", 
-                              "Déficit específico masculino", 
-                              "Mortalidade implícita homens 15-29")),
-      x = "Ano", y = "Número de mortes",
-      color = "Tipo", fill = "Tipo"
-    ) +
-    scale_x_continuous(breaks = seq(1950, 2020, by = 10)) +
-    scale_y_continuous(labels = scales::comma) +
-    scale_color_manual(values = cores_tipo) +   # substitui scale_color_ipea
-    scale_fill_manual(values = cores_tipo) +    # substitui scale_fill_ipea
-    theme_ipea() +                           # substitui theme_ipea
-    theme(legend.position = "bottom")
-}
-# Gerar gráficos para cada combinação
-# (Aqui você pode salvar ou exibir)
-for (pred in c("deficit_especifico", "mort_implicita")) {
-  for (trans in c("linear", "log")) {
-    p <- plot_backcast(serie_completa, pred, trans)
-    print(p)
-    
-    # Salvar (opcional)
-    ggsave(paste0("backcast_", pred, "_", trans, ".png"), p, width = 10, height = 6)
-  }
-}
+    tx_mortes_violentas_imputado = mortes_violentas_imputado * 1e5 / população,
+    tx_lwr = mortes_violentas_lwr_95 * 1e5 / população,
+    tx_upr = mortes_violentas_upr_95 * 1e5 / população
+  )
 
 # ------------------------------------------------------------------------------
-# 6. TABELA POR PERÍODO INTERCENSAL
+# 8. GRÁFICO DE TAXAS
 # ------------------------------------------------------------------------------
 
-# Definir períodos intercensitários
+tx_ARIMAX <- ggplot() + 
+  geom_ribbon(data = backcast_tx,
+              aes(x = ano, ymin = tx_lwr, ymax = tx_upr),
+              fill = "gray80", alpha = 0.6) +
+  geom_line(data = serie_completa_tx,
+            aes(x = ano, y = tx_mortes_violentas, color = tipo), linewidth = 1) +
+  geom_vline(xintercept = 1978.5, linetype = "dashed") +
+  labs(title = "Taxa de mortes violentas: retropolação - ARIMAX(bootstrap 95%)",
+       subtitle = "imputação (1940–1978) por sobrevivência específica de coortes masculinas 15-29",
+       x = "ano", y = "taxa por 100 mil habitantes", color = "") +
+  theme_ipea(legend.position = "bottom") +
+  scale_color_ipea(palette = "Red-Blue-White") +
+  scale_fill_ipea(palette = "Red-Blue-White")
+
+print(tx_ARIMAX)
+
+save_ipeaplot(tx_ARIMAX, "taxa de mortes violentas reconstruida arimax",
+              format = c("png", "eps"))
+
+# ------------------------------------------------------------------------------
+# 9. (OPCIONAL) SALVAR RESULTADOS
+# ------------------------------------------------------------------------------
+
+write.csv2(backcast_mv, "backcast_mortes_violentas_bootstrap.csv", row.names = FALSE)
+write.csv2(backcast_tx, "backcast_taxas_mortes_violentas_bootstrap.csv", row.names = FALSE)
+
+cat("\n✅ Backcasting com bootstrap concluído. ICs baseados em percentis bootstrap.\n")
+
+# ==============================================================================
+# TABELA DE ESTIMATIVAS POR PERÍODO INTERCENSITÁRIO
+# ==============================================================================
+# Este código deve ser executado APÓS o backcasting com bootstrap em blocos.
+# Pressupõe que os objetos backcast_mv, obs_data, df_raw, e as séries de
+# população estejam disponíveis.
+# ==============================================================================
+
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(ggplot2)
+
+# ------------------------------------------------------------------------------
+# 1. PREPARAR SÉRIE COMPLETA COM INTERVALOS DE CONFIANÇA
+# ------------------------------------------------------------------------------
+
+# Dados imputados (1940-1978) – já com lwr e upr
+imputado <- backcast_mv %>%
+  dplyr::select(ano, 
+                valor = mortes_violentas_imputado,
+                lwr = mortes_violentas_lwr_95,
+                upr = mortes_violentas_upr_95) %>%
+  mutate(tipo = "imputado")
+
+# Dados observados (1979-2022) – sem incerteza, então lwr = upr = valor
+observado <- obs_data %>%
+  dplyr::select(ano, valor = mortes_violentas) %>%
+  mutate(lwr = valor, upr = valor, tipo = "observado")
+
+# Combinar
+serie_completa_ic <- bind_rows(imputado, observado) %>%
+  arrange(ano)
+
+# ------------------------------------------------------------------------------
+# 2. DEFINIR PERÍODOS
+# ------------------------------------------------------------------------------
+
 periodos <- tribble(
   ~periodo, ~ano_ini, ~ano_fim,
   "1950-1959", 1950, 1959,
   "1960-1969", 1960, 1969,
   "1970-1978", 1970, 1978,
-  "1979-1989", 1979, 1989,
-  "1990-1999", 1990, 1999,
+  "1979-1990", 1979, 1990,
+  "1991-1999", 1991, 1999,
   "2000-2009", 2000, 2009,
   "2010-2022", 2010, 2022
 )
 
-# Para cada combinação, calcular soma por período
-tabela_somas <- serie_completa %>%
-  filter(!is.na(estimado)) %>%
+# ------------------------------------------------------------------------------
+# 3. AGRUPAR POR PERÍODO E CALCULAR ESTATÍSTICAS AGREGADAS
+# ------------------------------------------------------------------------------
+
+# Juntar população (já interpolada em df_raw)
+pop_total <- df_raw %>% dplyr::select(ano, população)
+
+serie_completa_ic <- serie_completa_ic %>%
+  left_join(pop_total, by = "ano")
+
+# Atribuir período a cada ano
+serie_completa_ic <- serie_completa_ic %>%
   mutate(
     periodo = case_when(
       ano >= 1950 & ano <= 1959 ~ "1950-1959",
       ano >= 1960 & ano <= 1969 ~ "1960-1969",
       ano >= 1970 & ano <= 1978 ~ "1970-1978",
-      ano >= 1979 & ano <= 1989 ~ "1979-1989",
-      ano >= 1990 & ano <= 1999 ~ "1990-1999",
+      ano >= 1979 & ano <= 1990 ~ "1979-1990",
+      ano >= 1991 & ano <= 1999 ~ "1991-1999",
       ano >= 2000 & ano <= 2009 ~ "2000-2009",
       ano >= 2010 & ano <= 2022 ~ "2010-2022",
       TRUE ~ NA_character_
     )
   ) %>%
-  filter(!is.na(periodo)) %>%
-  group_by(periodo, tipo, transformacao, preditor) %>%
+  filter(!is.na(periodo))
+
+# Agregar por período
+tabela_periodos <- serie_completa_ic %>%
+  group_by(periodo) %>%
   summarise(
-    total = sum(estimado, na.rm = TRUE),
+    # Número de mortes (soma)
+    num_baixo = sum(lwr, na.rm = TRUE),
+    num_pontual = sum(valor, na.rm = TRUE),
+    num_alto = sum(upr, na.rm = TRUE),
+    
+    # População total no período (soma)
+    pop_total = sum(população, na.rm = TRUE),
+    
+    # Taxa por 100 mil (soma das mortes / soma da população * 1e5)
+    tx_baixo = (num_baixo / pop_total) * 1e5,
+    tx_pontual = (num_pontual / pop_total) * 1e5,
+    tx_alto = (num_alto / pop_total) * 1e5,
+    
     .groups = "drop"
   ) %>%
-  # Para os observados, manter apenas um preditor (já que é o mesmo)
+  # Ordenar conforme a ordem dos períodos definida
   mutate(
-    preditor = ifelse(preditor == "observado", "observado", preditor),
-    # Agrupar observados com transformação "linear" (já que é indiferente)
-    transformacao = ifelse(preditor == "observado", "linear", transformacao)
+    periodo = factor(periodo, levels = periodos$periodo)
   ) %>%
-  distinct(periodo, tipo, transformacao, preditor, total) %>%
-  pivot_wider(
-    names_from = c(tipo, transformacao, preditor),
-    values_from = total,
-    names_sep = "_"
-  )
-
-# Exibir tabela
-print(tabela_somas)
-
-# Salvar (opcional)
-write.csv2(tabela_somas, "tabela_backcast_periodos.csv", row.names = FALSE)
+  arrange(periodo)
 
 # ------------------------------------------------------------------------------
-# 7. (OPCIONAL) GRÁFICO FACETADO PARA VISUALIZAÇÃO CONJUNTA
+# 4. FORMATAR TABELA PARA EXIBIÇÃO
 # ------------------------------------------------------------------------------
-# Paleta manual para os três tipos
-cores_tipo <- c("homicidios" = "#D62728", 
-                "mce" = "#1F77B4", 
-                "mortes_violentas" = "#2CA02C")
 
-# Criar um gráfico com todos os cenários em painéis
-grafico_facetado <- serie_completa %>%
-  filter(preditor != "observado") %>%
+tabela_formatada <- tabela_periodos %>%
   mutate(
-    preditor_label = ifelse(preditor == "deficit_especifico", 
-                            "Déficit específico", 
-                            "Mortalidade implícita"),
-    transformacao_label = ifelse(transformacao == "linear", "Linear", "Log")
+    # Número: arredondar para inteiro
+    num_label = sprintf("%.0f (%.0f – %.0f)", num_pontual, num_baixo, num_alto),
+    # Taxa: duas casas decimais
+    tx_label = sprintf("%.2f (%.2f – %.2f)", tx_pontual, tx_baixo, tx_alto)
   ) %>%
-  ggplot(aes(x = ano, y = estimado, color = tipo)) +
-  geom_ribbon(aes(ymin = lwr, ymax = upr, fill = tipo), alpha = 0.15) +
-  geom_line(linewidth = 0.8) +                    # size → linewidth
-  geom_line(data = obs_long, aes(x = ano, y = estimado, color = tipo), linewidth = 1) +
-  geom_vline(xintercept = 1978.5, linetype = "dotted") +
-  facet_grid(preditor_label ~ transformacao_label) +
-  labs(x = "Ano", y = "Número de mortes", color = "Tipo", fill = "Tipo") +
-  scale_x_continuous(breaks = seq(1950, 2020, by = 10)) +
-  scale_y_continuous(labels = scales::comma) +
-  scale_color_manual(values = cores_tipo) +
-  scale_fill_manual(values = cores_tipo) +
-  theme_ipea() +
-  theme(legend.position = "bottom")
+  dplyr::select(periodo, num_label, tx_label)
 
-print(grafico_facetado)
-
-
-# Fim
-
-
-# ==============================================================================
-# EXPANSÃO: CONTRIBUIÇÃO DO AUMENTO DA MORTALIDADE VIOLENTA PARA O DÉFICIT
-# ==============================================================================
-# Pressupõe que os objetos do script anterior (serie_completa, df_raw, 
-# mortes_mais_erro) estão no ambiente.
-# ==============================================================================
+# Exibir tabela com kable
+tabela_formatada %>%
+  kable(
+    col.names = c("Período", "Número de mortes", "Taxa (por 100 mil)"),
+    caption = "Estimativas de mortes violentas por período intercensitário (IC 95% bootstrap)",
+    align = c("l", "c", "c")
+  ) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE)
 
 # ------------------------------------------------------------------------------
-# 1. Extrair série de mortes violentas (soma) e população
+# 5. SALVAR TABELA EM CSV
 # ------------------------------------------------------------------------------
 
-# População total por ano (já interpolada no df_raw)
-populacao <- df_raw %>% select(ano, pop = população)
-
-# Série de mortes violentas para todas as combinações (imputadas + observadas)
-# Filtramos apenas o tipo "mortes_violentas"
-mv_series <- serie_completa %>%
-  filter(tipo == "mortes_violentas") %>%
-  select(ano, transformacao, preditor, estimado, lwr, upr)
-
-# Juntar com população
-mv_series <- mv_series %>%
-  left_join(populacao, by = "ano") %>%
-  filter(ano >= 1950 & ano <= 1990)  # limitar ao período de interesse
+write.csv2(tabela_periodos, "tabela_mortes_violentas_por_periodo.csv", row.names = FALSE)
 
 # ------------------------------------------------------------------------------
-# 2. Calcular taxa por 100 mil habitantes para cada combinação
+# 6. (OPCIONAL) GRÁFICO DE BARRAS COM AS ESTIMATIVAS POR PERÍODO
 # ------------------------------------------------------------------------------
 
-mv_series <- mv_series %>%
+grafico_barras_periodo <- ggplot(tabela_periodos, aes(x = periodo, y = num_pontual)) +
+  geom_col(fill = "steelblue", alpha = 0.7) +
+  geom_errorbar(aes(ymin = num_baixo, ymax = num_alto), width = 0.2, color = "darkred") +
+  labs(
+    title = "Mortes violentas estimadas por período intercensitário",
+    subtitle = "Barras: estimativa pontual (mediana) | Barras de erro: IC 95% bootstrap",
+    x = "Período",
+    y = "Número de mortes"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(grafico_barras_periodo)
+ggsave("mortes_violentas_por_periodo.png", grafico_barras_periodo, width = 10, height = 6)
+
+# ------------------------------------------------------------------------------
+# 7. (OPCIONAL) TABELA COMPLETA COM NÚMEROS E TAXAS SEPARADOS
+# ------------------------------------------------------------------------------
+
+# Para referência, uma tabela mais detalhada
+tabela_detalhada <- tabela_periodos %>%
   mutate(
-    taxa = estimado * 100000 / pop,
-    taxa_lwr = lwr * 100000 / pop,
-    taxa_upr = upr * 100000 / pop
+    num_baixo = round(num_baixo, 0),
+    num_pontual = round(num_pontual, 0),
+    num_alto = round(num_alto, 0),
+    tx_baixo = round(tx_baixo, 2),
+    tx_pontual = round(tx_pontual, 2),
+    tx_alto = round(tx_alto, 2)
+  ) %>%
+  dplyr::select(periodo, num_baixo, num_pontual, num_alto, tx_baixo, tx_pontual, tx_alto)
+
+write.csv2(tabela_detalhada, "tabela_mortes_violentas_detalhada.csv", row.names = FALSE)
+
+cat("\n✅ Tabela gerada com sucesso!\n")
+cat("Arquivos salvos:\n")
+cat("  - tabela_mortes_violentas_por_periodo.csv (formatada)\n")
+cat("  - tabela_mortes_violentas_detalhada.csv (dados brutos)\n")
+
+#=======================================================================================
+# Comparação entre retropolação com dados de SP e com déficit jovem-masculino específico
+
+
+# 1. Preparar dados do método SP (pontuais) para 1960–1978 e 1979–2022
+# ------------------------------------------------------------------------------
+
+
+
+# Criar série completa do método déficit ARIMAX
+deficit_mortes_violentas <- bind_rows(
+  # Período observado (1979–2022) – use os valores observados
+  obs_data %>% 
+    dplyr::select(ano, mortes_violentas_deficit = mortes_violentas) %>% 
+    mutate(tipo = "observado"),
+  # Período imputado (1960–1978) – use as imputações ARIMAX
+  backcast_mv %>% 
+    dplyr::select(ano, mortes_violentas_deficit = mortes_violentas_imputado) %>% 
+    mutate(tipo = "imputado")
+) %>%
+  left_join(
+    backcast_mv %>% 
+      dplyr::select(ano, lwr = mortes_violentas_lwr_95, upr = mortes_violentas_upr_95),
+    by = "ano"
   )
 
-# Para os observados, temos apenas uma combinação (preditor = "observado")
-# Vamos manter as demais combinações (deficit_especifico e mort_implicita, linear e log)
-
-# ------------------------------------------------------------------------------
-# 3. Taxa de referência (média da década de 1950) para cada combinação
-# ------------------------------------------------------------------------------
-
-taxa_ref <- mv_series %>%
-  filter(ano >= 1950 & ano <= 1959) %>%
-  group_by(transformacao, preditor) %>%
-  summarise(
-    taxa_ref = mean(taxa, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# Juntar a referência à série completa
-mv_series <- mv_series %>%
-  left_join(taxa_ref, by = c("transformacao", "preditor"))
-
-# ------------------------------------------------------------------------------
-# 4. Calcular excesso anual (apenas quando taxa > referência)
-# ------------------------------------------------------------------------------
-
-mv_series <- mv_series %>%
-  mutate(
-    excesso = pmax(0, (taxa - taxa_ref) * pop / 100000),
-    excesso_lwr = pmax(0, (taxa_lwr - taxa_ref) * pop / 100000),
-    excesso_upr = pmax(0, (taxa_upr - taxa_ref) * pop / 100000)
-  )
-
-# ------------------------------------------------------------------------------
-# 5. Soma do excesso para o período 1961-1990
-# ------------------------------------------------------------------------------
-
-excesso_total <- mv_series %>%
-  filter(ano >= 1961 & ano <= 1990) %>%
-  group_by(transformacao, preditor) %>%
-  summarise(
-    excesso_total = sum(excesso, na.rm = TRUE),
-    excesso_lwr_total = sum(excesso_lwr, na.rm = TRUE),
-    excesso_upr_total = sum(excesso_upr, na.rm = TRUE),
-    .groups = "drop"
-  )
-
-# ------------------------------------------------------------------------------
-# 6. Obter o déficit de pessoas únicas (já calculado anteriormente)
-# ------------------------------------------------------------------------------
-
-# O objeto 'mortes_mais_erro' vem do script anterior (déficit líquido de pessoas únicas)
-# Se não existir, calcule a partir de 'total_pessoas_unicas' ou de 'pessoas_unicas_coorte'
-if (!exists("mortes_mais_erro")) {
-  # Se não tiver, podemos calcular novamente (mas já deve existir)
-  # Aqui usamos o valor que estava na tabela final do script anterior
-  # Você pode substituir pelo valor exato que apareceu na sua saída
+deficit_tx_mortes_violentas <- bind_rows(
   
-}
+  # Observado (correto)
+  serie_completa_tx %>% 
+    dplyr::filter(tipo == "observado") %>%
+    dplyr::select(ano, tx_deficit = tx_mortes_violentas) %>% 
+    mutate(tipo = "observado"),
+  
+  # Imputado
+  backcast_tx %>% 
+    dplyr::select(ano, tx_deficit = tx_mortes_violentas_imputado) %>% 
+    mutate(tipo = "imputado")
+  
+) %>%
+  left_join(
+    backcast_tx %>% 
+      dplyr::select(ano, lwr = tx_lwr, upr = tx_upr),
+    by = "ano"
+  )
 
-# ------------------------------------------------------------------------------
-# 7. Tabela comparativa
-# ------------------------------------------------------------------------------
 
-tabela_excesso <- excesso_total %>%
+# População completa de df_raw (já imputada para anos sem censo)
+pop_completa <- df_raw %>% 
+  dplyr::select(ano, populacao_df = população)
+
+sp_mortes_violentas <- dados_1960_2022 %>%
+  dplyr::select(ano, mortes_violentas_sp = mortes_violentas) %>%
+  left_join(pop_completa, by = "ano") %>%
   mutate(
-    preditor_label = ifelse(preditor == "deficit_especifico", 
-                            "Déficit específico", 
-                            "Mortalidade implícita"),
-    transformacao_label = ifelse(transformacao == "linear", "Linear", "Log")
+    tx_mortes_violentas_sp = (mortes_violentas_sp / populacao_df) * 1e5
   ) %>%
-  unite("cenario", preditor_label, transformacao_label, sep = " - ") %>%
-  dplyr::select(cenario, excesso_total, excesso_lwr_total, excesso_upr_total)
+  dplyr::select(-populacao_df)
 
-# Adicionar linha com o déficit
-tabela_comparacao <- tabela_excesso %>%
-  add_row(
-    cenario = "Déficit de pessoas únicas (1961-1990)",
-    excesso_total = mortes_mais_erro,
-    excesso_lwr_total = NA,
-    excesso_upr_total = NA
+# Em vez de sp_homicidios, use sp_mortes_violentas
+comparacao_numeros <- sp_mortes_violentas %>%
+  left_join(
+    deficit_mortes_violentas %>% 
+      dplyr::select(ano, mortes_violentas_deficit, lwr_mv = lwr, upr_mv = upr),
+    by = "ano"
   )
 
-# Exibir
-print(tabela_comparacao)
+comparacao_taxas <- sp_mortes_violentas %>%
+  left_join(
+    deficit_tx_mortes_violentas %>% 
+      dplyr::select(ano, tx_mortes_violentas_deficit = tx_deficit, 
+                    lwr_tx = lwr, upr_tx = upr),
+    by = "ano"
+  )
 
-# ------------------------------------------------------------------------------
-# 8. Resumo mínimo e máximo entre cenários (para o excesso)
-# ------------------------------------------------------------------------------
+# ============================================
+# COMPARAÇÃO NUMÉRICA ENTRE MÉTODOS (1960–1978)
+# ============================================
 
-excesso_min <- min(tabela_excesso$excesso_total, na.rm = TRUE)
-excesso_max <- max(tabela_excesso$excesso_total, na.rm = TRUE)
-
-cat("\nIntervalo de estimativas do excesso de mortes violentas:\n")
-cat("  Mínimo:", round(excesso_min, 0), "\n")
-cat("  Máximo:", round(excesso_max, 0), "\n")
-cat("Déficit de pessoas únicas:", round(mortes_mais_erro, 0), "\n")
-cat("Proporção do déficit explicada:\n")
-cat("  Mínimo:", round(100 * excesso_min / mortes_mais_erro, 1), "%\n")
-cat("  Máximo:", round(100 * excesso_max / mortes_mais_erro, 1), "%\n")
-
-# ------------------------------------------------------------------------------
-# 9. Gráfico do excesso anual (série temporal) para cada cenário
-# ------------------------------------------------------------------------------
-
-# Preparar dados para gráfico (apenas excesso anual, sem IC para simplificar)
-mv_anual <- mv_series %>%
-  filter(ano >= 1961 & ano <= 1990) %>%
+comparacao_1960_1978 <- comparacao_numeros %>%
+  dplyr::filter(ano >= 1960, ano <= 1978) %>%
   mutate(
-    preditor_label = ifelse(preditor == "deficit_especifico", 
-                            "Déficit específico", 
-                            "Mortalidade implícita"),
-    transformacao_label = ifelse(transformacao == "linear", "Linear", "Log"),
-    cenario = paste(preditor_label, transformacao_label, sep = " - ")
+    diff_abs = mortes_violentas_deficit - mortes_violentas_sp,
+    diff_pct = 100 * diff_abs / mortes_violentas_sp
   )
 
-# Gráfico
-# Gráfico
-grafico_excesso_anual <- ggplot(mv_anual, aes(x = ano, y = excesso, color = cenario)) +
-  geom_line(linewidth = 0.9) +
-  geom_vline(xintercept = c(1964, 1985), linetype = "dashed", color = "gray40") +
-  geom_hline(yintercept = mortes_mais_erro / 30, linetype = "dashed", color = "black") +  # média anual do déficit
-  annotate("text", x = 1975, y = mortes_mais_erro / 30 * 1.1, 
-           label = paste("Déficit médio anual:", round(mortes_mais_erro / 30, 0)), 
-           color = "black", size = 4) +
-  labs(
-    title = "Excesso anual de mortes violentas (1961-1990)",
-    subtitle = "Comparação com a taxa de referência da década de 1950",
-    x = "Ano", y = "Excesso de mortes",
-    color = "Cenário", fill = "Cenário"
-  ) +
-  scale_x_continuous(breaks = seq(1960, 1990, by = 5)) +
-  scale_y_continuous(labels = scales::comma) +
-  theme_minimal() +
-  theme(legend.position = "bottom") +
-  guides(color = guide_legend(override.aes = list(size = 2)))
+# 1. Soma total no período
+resumo_total <- comparacao_1960_1978 %>%
+  summarise(
+    total_sp = sum(mortes_violentas_sp, na.rm = TRUE),
+    total_deficit = sum(mortes_violentas_deficit, na.rm = TRUE),
+    diff_total = total_deficit - total_sp,
+    diff_pct_total = 100 * diff_total / total_sp
+  )
+
+print(resumo_total)
 
 
-print(grafico_excesso_anual)
+#criar variável de período intercensal
 
-# ------------------------------------------------------------------------------
-# 10. Gráfico de barras: proporção do déficit explicada por cada cenário
-# ------------------------------------------------------------------------------
-
-tabela_proporcao <- tabela_excesso %>%
-  dplyr::filter(cenario == "Déficit específico - Linear" | cenario == "Déficit específico - Log") %>%
-    dplyr::select(cenario, excesso_total) %>%
+comparacao_periodos <- comparacao_numeros %>%
   mutate(
-    proporcao = excesso_total / mortes_mais_erro * 100
+    periodo = case_when(
+      ano >= 1960 & ano < 1970 ~ "1960-1970",
+      ano >= 1970 & ano < 1980 ~ "1970-1980"
+    )
+  ) %>%
+  filter(!is.na(periodo))
+
+#Agregar por período
+# Totais
+resumo_total_periodos <- comparacao_periodos %>%
+  group_by(periodo) %>%
+  summarise(
+    sp_total = sum(mortes_violentas_sp, na.rm = TRUE),
+    deficit_total = sum(mortes_violentas_deficit, na.rm = TRUE),
+    diff_abs = deficit_total - sp_total,
+    diff_pct = 100 * diff_abs / sp_total,
+    .groups = "drop"
   )
 
-print(tabela_proporcao)
+print(resumo_total_periodos)
 
-grafico_barras <- ggplot(tabela_proporcao, aes(x = cenario, y = proporcao, fill = cenario)) +
-  geom_col(alpha = 0.7) +
-  geom_hline(yintercept = 100, linetype = "dashed", color = "red") +
+# Médias
+resumo_media_periodos <- comparacao_periodos %>%
+  group_by(periodo) %>%
+  summarise(
+    sp_media = mean(mortes_violentas_sp, na.rm = TRUE),
+    deficit_media = mean(mortes_violentas_deficit, na.rm = TRUE),
+    diff_media = deficit_media - sp_media,
+    diff_pct = 100 * diff_media / sp_media,
+    .groups = "drop"
+  )  
+print(resumo_media_periodos)
+
+#Visualizar
+
+ggplot(resumo_total_periodos, aes(x = periodo)) +
+  geom_col(aes(y = sp_total, fill = "imput. por SP"), position = "dodge") +
+  geom_col(aes(y = deficit_total, fill = "imput. por déficit"), position = "dodge") +
   labs(
-    title = "Proporção do déficit explicada pelo excesso de mortalidade violenta",
-    x = "", y = "% do déficit total",
-    fill = "cenario"
+    title = "Mortes violentas por período intercensal",
+    x = "Período",
+    y = "Total de mortes",
+    fill = "Método"
   ) +
-  theme_minimal() +
-  theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1))
+  theme_ipea() +
+  scale_color_ipea(palette = "Red-Blue-White") +
+  scale_fill_ipea(palette = "Red-Blue-White")
 
-print(grafico_barras)
+ggplot(resumo_total_periodos, aes(x = periodo, y = diff_pct)) +
+  geom_col() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Diferença percentual entre métodos por período",
+    y = "% (imput. déficit vs SP)",
+    x = ""
+  ) +
+  theme_ipea() +
+  scale_color_ipea(palette = "Red-Blue-White") +
+  scale_fill_ipea(palette = "Red-Blue-White")
 
-# ------------------------------------------------------------------------------
-# 11. Salvar resultados
-# ------------------------------------------------------------------------------
 
-write.csv2(tabela_comparacao, "tabela_excesso_vs_deficit.csv", row.names = FALSE)
-ggsave("excesso_anual_mortes_violentas.png", grafico_excesso_anual, width = 10, height = 6)
-ggsave("proporcao_deficit_explicado.png", grafico_barras, width = 8, height = 5)
-
-cat("\n✅ Análise concluída. Resultados salvos.\n")
+sum(backcast_mv$mortes_violentas_imputado)
 
