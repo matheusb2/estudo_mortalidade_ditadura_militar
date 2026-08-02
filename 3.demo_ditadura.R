@@ -320,7 +320,8 @@ dados_long <- bind_rows(dados_homens, dados_mulheres)
 #preparação dos dados
 faixas_idade <- tribble(
   ~faixa_idade, ~idade_min, ~idade_max,
-  "0-14",        0,          14,
+  "0-9",         0,          9,
+  "10-14",       10,         14,
   "15-29",       15,         29,
   "30-49",       30,         49,
   "50-69",       50,         69
@@ -460,8 +461,9 @@ print(tabela_padronizada)
 
 # 1. Preparação dos dados: Ordenação e Agregação
 dados_grafico_area <- deficits_all |>
-  # Garante a ordem correta das faixas (da base para o topo)
-  mutate(faixa_idade = factor(faixa_idade, levels = c("0-14", "15-29", "30-49", "50-69"))) |>
+  filter(idade_central >= 15) |>
+    # Garante a ordem correta das faixas (da base para o topo)
+  mutate(faixa_idade = factor(faixa_idade, levels = c("0-9","10-14", "15-29", "30-49", "50-69"))) |>
   # Cria o grupo combinado
   mutate(grupo_label = paste(faixa_idade, sexo, sep = " - ")) |>
   # Transforma o label em fator ordenado pela faixa etária para o empilhamento ficar correto
@@ -501,7 +503,8 @@ save_ipeaplot(grafico_area_empilhado_liso, "composicao_deficit",
 
 # Agrupamento final para o gráfico de área das taxas
 dados_taxas_area <- deficits_relativos |>
-  mutate(faixa_idade = factor(faixa_idade, levels = c("0-14", "15-29", "30-49", "50-69"))) |>
+  filter(idade_central >= 15) |>
+  mutate(faixa_idade = factor(faixa_idade, levels = c("0-9", "10-14", "15-29", "30-49", "50-69"))) |>
   mutate(grupo_label = paste(faixa_idade, sexo, sep = " - ")) |>
   mutate(grupo = fct_reorder(grupo_label, as.numeric(faixa_idade))) |>
   group_by(ano, grupo) |>
@@ -509,7 +512,7 @@ dados_taxas_area <- deficits_relativos |>
 
 # Gráfico de Intensidade Acumulada
 grafico_final_taxas <- dados_taxas_area |>
-  ggplot(aes(x = ano, y = taxa_total_ano, fill = grupo)) +
+    ggplot(aes(x = ano, y = taxa_total_ano, fill = grupo)) +
   geom_area(alpha = 0.85, colour = "white", linewidth = 0.1) +
   scale_x_continuous(breaks = c(1950, 1960, 1970, 1980, 1991, 2000, 2010, 2022)) +
   labs(
@@ -772,7 +775,7 @@ for(i in 1:(length(census_years)-1)) {
                                     census_years[i], 
                                     census_years[i+1], 
                                     age_start = 15, 
-                                    age_end = 29)
+                                    age_end = 35)
   survival_list[[i]] <- surv
 }
 
@@ -786,7 +789,7 @@ all_years <- min(dados_long$ano):max(dados_long$ano)
 create_deficit_grid <- function(sex) {
   grid <- expand_grid(coorte = all_cohorts, ano = all_years) %>%
     mutate(idade_central = ano - coorte) %>%
-    filter(idade_central >= 10, idade_central <= 29) %>%
+    filter(idade_central >= 10, idade_central <= 35) %>%
     left_join(dados_long %>% 
                 filter(sexo == sex) %>% 
                 dplyr::select(coorte, ano, pop_obs = populacao),
@@ -2253,12 +2256,12 @@ total_pessoas_unicas <- pessoas_unicas_coorte |>
 print(total_pessoas_unicas)
 
 # ==============================================================================
-# (NOVO) DÉFICIT INFANTIL (0-9 ANOS) E ATUALIZAÇÃO DO TOTAL
+# (NOVO) DÉFICIT INFANTIL (0-14 ANOS) E ATUALIZAÇÃO DO TOTAL
 # ==============================================================================
 
-# 1. Déficit em pessoas-ano para 0-9 anos (usando idade_central <= 9.5)
+# 1. Déficit em pessoas-ano para 0-14 anos (usando idade_central <= 12.5
 deficit_criancas <- deficits_all %>%
-  filter(idade_central <= 9.5) %>%
+  filter(idade_central <= 14) %>%
   group_by(coorte, sexo) %>%
   summarise(
     deficit_pessoas_ano_criancas = sum(deficit, na.rm = TRUE),
@@ -2297,6 +2300,102 @@ pessoas_unicas_criancas <- deficit_criancas %>%
 total_pessoas_unicas_criancas <- sum(pessoas_unicas_criancas$pessoas_unicas, na.rm = TRUE)
 
 print(total_pessoas_unicas_criancas)
+
+# ==============================================================================
+# DÉFICIT DE JOVENS (15-29 ANOS) E ATUALIZAÇÃO DO TOTAL
+# ==============================================================================
+
+# 1. Déficit em pessoas-ano para 0-14 anos (usando idade_central <= 12.5
+deficit_jovens <- deficits_all %>%
+  filter(idade_central <= 29) %>%
+  filter(idade_central >= 15) %>%
+  group_by(coorte, sexo) %>%
+  summarise(
+    deficit_pessoas_ano_jovens = sum(deficit, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Informações de exposição para essas coortes
+#    Reaproveitamos coortes_info, mas se alguma coorte não estiver lá, criamos
+coortes_info_jovens <- deficit_total %>%
+  filter(idade_central <= 29) %>%
+  filter(idade_central >= 15) %>%
+  group_by(coorte) %>%
+  summarise(
+    ano_inicio = min(ano, na.rm = TRUE),
+    idade_inicio = min(idade_central, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    anos_restantes_idade = pmax(69 - idade_inicio, 0),
+    anos_restantes_tempo = ano_final - ano_inicio,  # ano_final = 1990 (definido antes)
+    anos_exposicao = pmin(anos_restantes_idade, anos_restantes_tempo),
+    peso_exposicao = pmin(anos_exposicao / 10, 1)
+  )
+
+# 3. Pessoas únicas para crianças
+pessoas_unicas_jovens <- deficit_jovens %>%
+  left_join(coortes_info_jovens, by = "coorte") %>%
+  mutate(
+    pessoas_unicas = if_else(
+      anos_exposicao > 0,
+      deficit_pessoas_ano_jovens / anos_exposicao,
+      0
+    ),
+    pessoas_unicas = pessoas_unicas * peso_exposicao
+  )
+
+total_pessoas_unicas_jovens <- sum(pessoas_unicas_jovens$pessoas_unicas, na.rm = TRUE)
+
+print(total_pessoas_unicas_jovens)
+
+# ==============================================================================
+# DÉFICIT DE ADULTOS (30-49 ANOS) E ATUALIZAÇÃO DO TOTAL
+# ==============================================================================
+
+# 1. Déficit em pessoas-ano para 0-14 anos (usando idade_central <= 12.5
+deficit_adultos <- deficits_all %>%
+  filter(idade_central <= 49) %>%
+  filter(idade_central >= 30) %>%
+  group_by(coorte, sexo) %>%
+  summarise(
+    deficit_pessoas_ano_adultos = sum(deficit, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# 2. Informações de exposição para essas coortes
+#    Reaproveitamos coortes_info, mas se alguma coorte não estiver lá, criamos
+coortes_info_adultos <- deficit_total %>%
+  filter(idade_central <= 49) %>%
+  filter(idade_central >= 30) %>%
+  group_by(coorte) %>%
+  summarise(
+    ano_inicio = min(ano, na.rm = TRUE),
+    idade_inicio = min(idade_central, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    anos_restantes_idade = pmax(69 - idade_inicio, 0),
+    anos_restantes_tempo = ano_final - ano_inicio,  # ano_final = 1990 (definido antes)
+    anos_exposicao = pmin(anos_restantes_idade, anos_restantes_tempo),
+    peso_exposicao = pmin(anos_exposicao / 10, 1)
+  )
+
+# 3. Pessoas únicas para crianças
+pessoas_unicas_adultos <- deficit_adultos %>%
+  left_join(coortes_info_adultos, by = "coorte") %>%
+  mutate(
+    pessoas_unicas = if_else(
+      anos_exposicao > 0,
+      deficit_pessoas_ano_adultos / anos_exposicao,
+      0
+    ),
+    pessoas_unicas = pessoas_unicas * peso_exposicao
+  )
+
+total_pessoas_unicas_adultos <- sum(pessoas_unicas_adultos$pessoas_unicas, na.rm = TRUE)
+
+print(total_pessoas_unicas_adultos)
 
 # ==============================================================================
 # EXCESSO DE MORTALIDADE DE IDOSOS (50-69) – MÉTODO DE TRANSIÇÃO CONSISTENTE
@@ -2482,8 +2581,10 @@ tabela_comparativa_final <- tibble::tibble(
     "Excesso de demais violencias – intermediário (cf3)",
     "Excesso de demais violencias – extremo (cf4)",
     
-    "Excesso de mortalidade na infância (0-9 anos)",
-    "Excesso de mortalidade na velhice (50-69 anos)"
+    "Déficit de sobrevivência de jovens (15-29 anos)",
+    "Déficit de sobrevivência de adultos (30-49 anos)",
+    "Déficit de sobrevivência na infância (0-14 anos)",
+    "Déficit de sobrevivência na velhice (50-69 anos)"
     
     
   ),
@@ -2499,8 +2600,10 @@ tabela_comparativa_final <- tibble::tibble(
     round(excesso_violencia_acumulado$outras_violencias_cf3,0),
     round(excesso_violencia_acumulado$outras_violencias_cf4,0),
     
+    round(total_pessoas_unicas_jovens, 0),
+    round(total_pessoas_unicas_adultos, 0),
     round(total_pessoas_unicas_criancas,0),
-    round(total_excesso_50_59, 0)
+    round(total_excesso_50_59 + total_excesso_60_69, 0)
   )
 ) |>
   mutate(
@@ -2526,7 +2629,7 @@ write.csv(
 
 # 1. Isolar as taxas médias de déficit por ano e por faixa etária de interesse
 dados_impacto_regime <- deficits_relativos |>
-  filter(faixa_idade %in% c("0-14", "15-29", "30-49", "50-69")) |>
+  filter(faixa_idade %in% c("0-9", "10-14", "15-29", "30-49", "50-69")) |>
   group_by(ano, faixa_idade) |>
   summarise(
     taxa_deficit_media = mean(taxa_deficit, na.rm = TRUE),
@@ -2573,10 +2676,18 @@ modelo_dummy_adultos <- lm(
 
 summary(modelo_dummy_adultos)
 
-# criancas
+# adolescentes
+modelo_dummy_adolescentes <- lm(
+  taxa_deficit_media ~ regime_militar*tempo, 
+  data = dados_impacto_regime |> filter(faixa_idade == "10-14")
+)
+
+summary(modelo_dummy_adolescentes)
+
+# Crianças
 modelo_dummy_criancas <- lm(
   taxa_deficit_media ~ regime_militar*tempo, 
-  data = dados_impacto_regime |> filter(faixa_idade == "0-14")
+  data = dados_impacto_regime |> filter(faixa_idade == "0-9")
 )
 
 summary(modelo_dummy_criancas)
@@ -2668,11 +2779,32 @@ print(grafico_adultos)
 
 
 #---------------------------------------------
-# Gráfico 4: crianças de 10 a 14 anos
+# Gráfico 4: crianças de 0 a 9 anos
 #---------------------------------------------
-dados_criancas <- dados_plot %>% filter(faixa_idade == "0-14")
+dados_criancas <- dados_plot %>% filter(faixa_idade == "0-9")
 
 grafico_criancas <- ggplot(dados_criancas, aes(x = ano, y = taxa_deficit_media)) +
+  geom_point(alpha = 0.5, size = 2.5) +
+  geom_smooth(aes(color = regime_f, group = regime_f),
+              method = "lm", se = TRUE, linewidth = 1.2) +
+  geom_vline(xintercept = c(1964, 1985), linetype = "dashed", color = "gray40") +
+  scale_color_manual(values = c("grey50", "#D62728")) +
+  labs(
+    title = "0-9 anos",
+    subtitle = "",
+    x = "ano", y = "",
+    color = "Período"
+  ) +
+  theme_ipea(legend.position = "none")
+
+print(grafico_criancas)
+
+#---------------------------------------------
+# Gráfico 5: crianças de 10 a 14 anos
+#---------------------------------------------
+dados_adolescentes <- dados_plot %>% filter(faixa_idade == "10-14")
+
+grafico_adolescentes <- ggplot(dados_criancas, aes(x = ano, y = taxa_deficit_media)) +
   geom_point(alpha = 0.5, size = 2.5) +
   geom_smooth(aes(color = regime_f, group = regime_f),
               method = "lm", se = TRUE, linewidth = 1.2) +
@@ -2686,13 +2818,14 @@ grafico_criancas <- ggplot(dados_criancas, aes(x = ano, y = taxa_deficit_media))
   ) +
   theme_ipea(legend.position = "none")
 
-print(grafico_criancas)
+print(grafico_adolescentes)
+
 
 #Gráfico síntese
 
 # Filtrar apenas as idades desejadas
 dados_filtrados <- dados_plot %>% 
-  filter(faixa_idade %in% c("15-29", "30-49", "50-69", "0-14"))
+  filter(faixa_idade %in% c("15-29", "30-49", "50-69"))
 
 # Criar o gráfico com facet_wrap
 sintese_idades_regime <- ggplot(dados_filtrados, aes(x = ano, y = taxa_deficit_media)) +
@@ -2791,7 +2924,7 @@ dados_completos <- dados_impacto_regime |>
 # o regime ainda teve um efeito X no déficit de crianças"
 modelo_controlado <- lm(
   taxa_deficit_media ~ regime_militar + tft_interp + tempo, 
-  data = dados_completos |> filter(faixa_idade == "0-14")
+  data = dados_completos |> filter(faixa_idade == "0-9")
 )
 
 summary(modelo_controlado)
@@ -3467,7 +3600,7 @@ save_ipeaplot(grafico_reg_facetado,
 
 # 1. Calcular déficit total por coorte e sexo (todos os anos, todas as idades)
 deficit_coorte <- deficits_all %>%
-  filter(ano >= 1961 & ano <= 1990) %>%
+  filter(ano >= 1960 & ano <= 1991) %>%
   group_by(coorte, sexo) %>%
   summarise(
     deficit_total = sum(deficit, na.rm = TRUE),
@@ -3478,8 +3611,8 @@ deficit_coorte <- deficits_all %>%
 pop_inicial <- dados_long %>%
   group_by(coorte, sexo) %>%
   arrange(ano) %>%
-  slice(1) %>%
-  select(coorte, sexo, pop_inicial = populacao)
+  select(coorte, sexo, pop_inicial = populacao) %>%
+  filter(coorte <= 1964)
 
 # 3. Calcular taxa de déficit = déficit total / população inicial
 taxa_deficit_coorte <- deficit_coorte %>%
@@ -3492,15 +3625,15 @@ taxa_deficit_coorte <- deficit_coorte %>%
 
 # 4. Gráfico
 grafico_coortes_sexo <- ggplot(taxa_deficit_coorte, 
-                               aes(x = ano_nascimento, y = taxa_deficit, color = sexo)) +
+                               aes(x = coorte, y = taxa_deficit, color = sexo)) +
   geom_point(alpha = 0.25, size = 1.5) +
   geom_smooth(method = "loess", se = TRUE, linewidth = 1.5, span = 0.6) +
   geom_vline(xintercept = 1964, linetype = "dashed", color = "red", alpha = 0.6) +
   scale_color_manual(values = c("homens" = "#1f77b4", "mulheres" = "#ff7f0e"),
                      labels = c("Homens", "Mulheres")) +
   labs(
-    title = "Taxa de déficit de sobrevivência por coorte de nascimento e sexo",
-    subtitle = "déficit (pessoas-ano) / população inicial da coorte. Período de: exposição: 61-90; referência: 50-60.",
+    title = "déficit % de sobrevivência por coorte de nascimento e sexo",
+    subtitle = "déficit (pessoas-ano) / população inicial da coorte. Exposição: 60-91; referência: 50-60.",
     x = "ano de nascimento da coorte",
     y = "taxa de pessoas-ano (proporção da coorte ausente)",
     color = "Sexo"
