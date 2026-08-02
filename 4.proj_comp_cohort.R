@@ -212,11 +212,14 @@ modelo_cdr_imr <- lm(CDR ~ IMR, data = dados_pre)
 
 # IMR histórica 1930-1960 para modelo log-linear
 imr_hist <- data.frame(
-  ano = seq(1930, 1960, 5),
-  IMR = imr_interp[imr_years_all %in% seq(1930, 1960, 5)]
+  ano = seq(1946, 1963, 5),
+  IMR = imr_interp[imr_years_all %in% seq(1946, 1963, 5)]
 )
 
-modelo_log <- lm(log(IMR) ~ ano, data = imr_hist)
+coint.test(imr_hist$IMR, imr_hist$ano)
+coint.test(imr_hist$IMR, imr_hist$ano + imr_hist$ano^2)
+
+modelo_log <- lm(log(IMR) ~ ano , data = imr_hist)
 
 summary(modelo_log)
 
@@ -224,7 +227,7 @@ anos_regime <- 1964:1985
 
 # modelo preditivo de tendência de mortalidade
 
-imr_model <- exp(predict(modelo_log, interval = "prediction", level = 0.95, 
+imr_model <- exp(predict(modelo_log, interval = "prediction", level = 0.8,
                            newdata = data.frame(ano = anos_regime)))
 
 summary(imr_model)
