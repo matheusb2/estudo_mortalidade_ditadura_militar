@@ -20,15 +20,74 @@ invisible(lapply(pacotes, library, character.only = TRUE))
 salvar_reconstrucao <- "/home/matheus/Documentos/IPEA/modelos/reconstrução homicídios/reconstrucao_homicidios_desde_1960"
 
 
-#===============================================================
-# Carregar dados
-#===============================================================
 
-str(dados_1960_2022)
+#=============================================================================
+# Correção de erros censitários
+#=============================================================================
 
-#================================================================
-#Integrar com demais dados
-#================================================================
+# Dados de subenumeração por idade e sexo (p)
+p_men <- c(0.060, 0.044, 0.015, 0.017, 0.025, 0.064, 0.049, 0.0385, 0.0025, -0.0125, -0.040)
+p_women <- c(0.056, 0.044, 0.009, 0.010, 0.015, 0.024, 0.012, 0.0105, 0.0025, -0.010, -0.030)
+age_groups <- c("0 a 4 anos", "5 a 9 anos", "10 a 14 anos", "15 a 19 anos",
+                "20 a 24 anos", "25 a 29 anos", "30 a 39 anos", "40 a 49 anos",
+                "50 a 59 anos", "60 a 69 anos", "70 ou mais")
+
+# Taxas de omissão líquida por ano (para os anos censitários usados)
+omissao <- data.frame(
+  ano = c(1930, 1940, 1950, 1960, 1970, 1980, 1991, 2000, 2010, 2022),
+  omissao_liquida = c(0.036, 0.036, 0.034, 0.033, 0.035, 0.023, 0.024, 0.03, 0.022, 0.039)
+)
+
+# Função para corrigir um data.frame de um único ano censitário
+corrigir_censo <- function(df_ano, ano) {
+  # Extrair a taxa de omissão para o ano
+  omissao_ano <- omissao$omissao_liquida[omissao$ano == ano]
+  if (length(omissao_ano) == 0) stop("Ano sem taxa de omissão")
+  
+  C_total <- 1 / (1 - omissao_ano)
+  
+  # Construir nomes das colunas para homens e mulheres
+  col_homens <- paste0("homens ", age_groups)
+  col_mulheres <- paste0("mulheres ", age_groups)
+  
+  # Obter contagens brutas (já numéricas)
+  pop_homens <- as.numeric(df_ano[col_homens])
+  pop_mulheres <- as.numeric(df_ano[col_mulheres])
+  
+  # Fatores iniciais
+  f0_homens <- 1 / (1 - p_men)
+  f0_mulheres <- 1 / (1 - p_women)
+  
+  # População corrigida preliminar
+  pop_corr_homens <- pop_homens * f0_homens
+  pop_corr_mulheres <- pop_mulheres * f0_mulheres
+  
+  # Totais
+  total_bruto <- sum(pop_homens) + sum(pop_mulheres)
+  total_corr_prelim <- sum(pop_corr_homens) + sum(pop_corr_mulheres)
+  
+  # Fator de escala
+  s <- (total_bruto * C_total) / total_corr_prelim
+  
+  # Fatores finais
+  f_homens <- f0_homens * s
+  f_mulheres <- f0_mulheres * s
+  
+  # Aplicar correção (usando listas para atribuição em uma única linha)
+  df_ano[col_homens] <- as.list(pop_homens * f_homens)
+  df_ano[col_mulheres] <- as.list(pop_mulheres * f_mulheres)
+  
+  # Atualizar a coluna "população" (total)
+  df_ano$população <- sum(df_ano[col_homens]) + sum(df_ano[col_mulheres])
+  
+  return(df_ano)
+}
+
+
+# ==============================================================================
+# 1. DADOS
+# ==============================================================================
+
 dados_para_join <- dados_1960_2022 |>
   dplyr::select(
     ano,
@@ -51,26 +110,6 @@ saveRDS(
     "serie_historica_homicidios_para_join.rds"
   )
 )
-
-# ==============================================================================
-# 1. DADOS DA VALIDAÇÃO (CENSOS 1950-2022 E ASSASSINADOS POLÍTICOS DOCUMENTADOS DE 1964-1985)
-# ==============================================================================
-
-# Dados do Censo, mortalidade (obs 1979-2022, imputado 1960-1978), acidentes de trabalho)
-#altere o endereço para onde o arquivo estiver
-#pacotes necessários
-
-
-#arquivos
-
-
-str(dados_mortes)
-
-
-
-# ==============================================================================
-# 1. DADOS
-# ==============================================================================
 
 # Dados do Censo, mortalidade (obs 1979-2022, imputado 1960-1978), acidentes de trabalho)
 #altere o endereço para onde o arquivo estiver
@@ -114,6 +153,133 @@ vars_criticas <- c(
 
 stopifnot(all(vars_criticas %in% names(df_raw)))
 
+# ==============================================================================
+# DISPERSÃO: DOCUMENTADAS × ESTIMATIVAS
+# ==============================================================================
+
+
+
+dados_disp <- df_raw |>
+  filter(ano >= 1960, ano <= 1990) |>
+  transmute(
+    documentadas = `mortos e desaparecidos documentados`,
+    hmcd_exces1 = excesso_homicidios_cf1,
+    hmcd_exces2 = excesso_homicidios_cf2,
+    hmcd_exces3 = excesso_homicidios_cf3,
+    mce_exces1 = excesso_mce_cf1,
+    mce_exces2 = excesso_mce_cf2,
+    mce_exces3 = excesso_mce_cf3
+  )
+
+dados_long_disp <- dados_disp |>
+  pivot_longer(-documentadas, names_to = "cenario", values_to = "excesso")
+
+# Criação de modelos de regressão
+summary(lm(hmcd_exces1 ~ documentadas, data = dados_disp))
+summary(lm(hmcd_exces2 ~ documentadas, data = dados_disp))
+summary(lm(hmcd_exces3 ~ documentadas, data = dados_disp))
+summary(lm(mce_exces1 ~ documentadas, data = dados_disp))
+summary(lm(mce_exces2 ~ documentadas, data = dados_disp))
+summary(lm(mce_exces3 ~ documentadas, data = dados_disp))
+
+# Preparar labels para as equações
+labels_eq <- dados_long_disp |>
+  group_by(cenario) |>
+  do({
+    modelo <- lm(excesso ~ documentadas, data = .)
+    s <- summary(modelo)
+    
+    tibble(
+      intercepto = coef(modelo)[1],
+      incl = coef(modelo)[2],
+      r2 = s$r.squared,
+      p = coef(s)[2, 4]
+    )
+  }) |>
+  ungroup() |>
+  mutate(
+    label = paste0(
+      "y = ",
+      round(intercepto, 1),
+      " + ",
+      round(incl, 2),
+      "x\n",
+      "R² = ",
+      round(r2, 3),
+      "\n",
+      "p = ",
+      format.pval(p, digits = 2)
+    )
+  )
+
+posicoes <- dados_long_disp |>
+  group_by(cenario) |>
+  summarise(
+    x = min(documentadas, na.rm = TRUE),
+    y = max(excesso, na.rm = TRUE)
+  )
+
+labels_eq <- labels_eq |>
+  left_join(posicoes, by = "cenario")
+
+# Gráfico de dispersão
+vitimas_oficiais_excesso_mortes <- ggplot(dados_long_disp, aes(x = documentadas, y = excesso)) +
+  geom_point(
+    alpha = 0.6,
+    size = 2,
+    shape = 4
+  ) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    linewidth = 1,
+    color = "steelblue"
+  ) +
+  geom_text(
+    data = labels_eq,
+    aes(
+      x = Inf,
+      y = -Inf,
+      label = label
+    ),
+    hjust = 1.1,
+    vjust = -0.5,
+    size = 3,
+    color = "red"
+  ) +
+  geom_label(
+    data = labels_eq,
+    aes(
+      x = Inf,
+      y = -Inf,
+      label = label
+    ),
+    hjust = 1.05,
+    vjust = -0.4,
+    size = 3,
+    color = "red",
+    fill = "white",
+    label.size = 0,
+    alpha = 0.85
+  ) +
+  facet_wrap(~ cenario, scales = "free_y") +
+  labs(
+    title = "Mortes documentadas vs. estimativas de excesso de violência",
+    subtitle = "Equações de regressão por cenário (1964–1985)",
+    x = "Mortes documentadas (por ano)",
+    y = "Excesso estimado de mortes violentas"
+  ) +
+  theme_ipea() +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma)
+
+vitimas_oficiais_excesso_mortes
+
+save_ipeaplot(vitimas_oficiais_excesso_mortes, "vítimas oficiais e excesso de mortes violentas",
+              path = pasta_saida, width = 8, height = 5,
+              format = c("eps", "png"))
+
+
 
 #==================
 #PASTAS
@@ -126,16 +292,20 @@ dir.create(pasta_saida, recursive = TRUE, showWarnings = FALSE)
 # INTERPOLAÇÕES
 # ==============================================================================
 
-# Identificar os anos censitários
-anos_censo <- c(1940, 1950, 1960, 1970, 1980, 1991, 2000, 2010, 2022)
+# Identificar os anos censitários (incluindo 1930)
+anos_censo <- c(1930, 1940, 1950, 1960, 1970, 1980, 1991, 2000, 2010, 2022)
+
+# Correção dos dados censitários pelo erro
+
+for (ano in anos_censo) {
+  idx <- which(df_raw$ano == ano)
+  if (length(idx) == 1) {
+    df_raw[idx, ] <- corrigir_censo(df_raw[idx, ], ano)
+  }
+}
 
 
-# Método spline cúbico
-
-library(dplyr)
-library(stringr)
-
-# Função para interpolação exponencial
+# Função para interpolação exponencial corrigida
 interpolacao <- function(ano, pop, anos_censo) {
   stopifnot(length(ano) == length(pop))
   
@@ -161,16 +331,31 @@ interpolacao <- function(ano, pop, anos_censo) {
     
     r <- (log(p1) - log(p0)) / (a1 - a0)
     
-    anos_inter <- ano > a0 & ano < a1
-    resultado[anos_inter] <- p0 * exp(r * (ano[anos_inter] - a0))
+    # Garante que NAs lógicos virem FALSE para evitar o erro de subscrição
+    anos_inter <- (ano > a0 & ano < a1)
+    anos_inter[is.na(anos_inter)] <- FALSE
+    
+    if (any(anos_inter)) {
+      resultado[anos_inter] <- p0 * exp(r * (ano[anos_inter] - a0))
+    }
   }
   
   resultado
 }
 
-# Selecionar colunas a serem interpoladas
+# 1. INTERPOLAR PRIMEIRO A COLUNA 'população' (Abrangendo 1930 a 2022)
+df_raw <- df_raw |>
+  mutate(
+    população = interpolacao(
+      ano = ano,
+      pop = população,
+      anos_censo = anos_censo
+    )
+  )
+
+# 2. SELECIONAR E INTERPOLAR OS GRUPOS POPULACIONAIS (A partir de 1940)
 cols_pop <- names(df_raw) |>
-  str_subset("^(homens|mulheres|população)\\s")
+  str_subset("^(homens|mulheres)\\s")
 
 # Aplicar interpolação exponencial para cada grupo populacional
 df_interp <- df_raw |>
@@ -185,23 +370,18 @@ df_interp <- df_raw |>
     )
   )
 
-
 df_raw <- df_interp
 
 
 # ==============================================================================
-# IMPUTAÇÃO DA POPULAÇÃO TOTAL (SOMA DOS GRUPOS)
+# IMPUTAÇÃO DA POPULAÇÃO TOTAL PARA ANOS POSTERIORES (SOMA DOS GRUPOS)
 # ==============================================================================
 
-# Identificar as colunas de grupos populacionais (homens e mulheres por faixa etária)
-# Excluir colunas que não são grupos populacionais básicos
+# Identificar colunas básicas de grupos populacionais
 grupos_pop <- names(df_raw) |>
   str_subset("^(homens|mulheres)\\s\\d+ a \\d+ anos$")
 
-
-# Verificar se encontramos as colunas
 if (length(grupos_pop) == 0) {
-  # Tenta um padrão alternativo mais simples para debug
   grupos_teste <- names(df_raw) |>
     str_subset("^(homens|mulheres)\\s")
   cat("Colunas encontradas começando com 'homens' ou 'mulheres':\n")
@@ -211,30 +391,31 @@ if (length(grupos_pop) == 0) {
 
 cat("Número de colunas de grupos populacionais encontradas:", length(grupos_pop), "\n")
 
-# Imputar população total como soma dos grupos populacionais para anos com NA
+# Imputar/atualizar a população total como soma dos grupos apenas onde a soma existe 
+# (preservando o valor interpolado de 1930 onde os grupos etários são NA)
 df_raw <- df_raw %>%
   mutate(
-    # Calcular a soma dos grupos para todas as linhas (para verificação)
     soma_grupos_calculada = rowSums(across(all_of(grupos_pop)), na.rm = TRUE),
-    # Substituir NA na coluna 'população' pela soma calculada
-    população = if_else(is.na(população), soma_grupos_calculada, população)
+    
+    # Só substitui se a população for NA E a soma calculada for maior que 0 
+    # (garantindo que 1930 continue com o valor log-linear da população total)
+    população = if_else(is.na(população) & soma_grupos_calculada > 0, soma_grupos_calculada, população)
   ) %>%
-  # Remover a coluna auxiliar
   dplyr::select(-soma_grupos_calculada)
 
 # Verificar resultado
 cat("\nVerificação da imputação:\n")
-cat("Total de NAs na coluna 'população' antes da imputação:", 
+cat("Total de NAs na coluna 'população' após a interpolação:", 
     sum(is.na(df_raw$população)), "\n")
 
-# Verificar consistência (opcional: comparar com anos censitários)
-cat("\nComparação com anos censitários (1940-2022):\n")
+# Verificar consistência com os anos censitários (1930-2022)
+cat("\nComparação com anos censitários (1930-2022):\n")
 df_raw |>
   filter(ano %in% anos_censo) |>
   dplyr::select(ano, população) |>
   print()
 
-plot(x=df_raw$ano,df_raw$população, type = "l")
+plot(x = df_raw$ano, y = df_raw$população, type = "l", main = "Evolução da População Total (1930-2022)")
 
 # ==============================================================================
 # VERIFICAÇÃO DE CONSISTÊNCIA
@@ -542,7 +723,8 @@ analise_repressao_deficit <- deficits_relativos |>
   summarise(taxa_deficit_media = mean(taxa_deficit, na.rm = TRUE), .groups = "drop") |>
   # Join com os dados brutos que contêm a taxa de mortos e desaparecidos
   left_join(
-    df_raw |> select(ano, taxa_repressao = `taxa mortos e desaparecidos`), 
+    df_raw |> select(ano, taxa_repressao = `taxa mortos e desaparecidos`, 
+                     tx_acdt_trabalho = `taxa de acidentes por 100 mil trabalhadores`), 
     by = "ano"
   ) |>
   # Filtramos o período da Ditadura (ou conforme disponibilidade dos dados documentados)
@@ -783,7 +965,7 @@ survival_ref <- bind_rows(survival_list)
 
 # Create grids for both sexes
 all_cohorts <- unique(dados_long$coorte)
-all_years <- min(dados_long$ano):max(dados_long$ano)
+all_years <- 1960:2022
 
 # Function to create deficit grid for a specific sex
 create_deficit_grid <- function(sex) {
@@ -1203,11 +1385,8 @@ series_taxas <- annual_deficit_total |>
     by = "ano"
   ) |>
   mutate(
-    taxa_deficit_jovem_masc =
-      (espec_deficit / pop_jovem_masculina) * 1e5,
-    
-    taxa_mortes_violentas =
-      (mortes_violentas / população) * 1e5
+    taxa_deficit_jovem_masc = (espec_deficit / pop_jovem_masculina) * 100000,
+    taxa_mortes_violentas = (mortes_violentas / população) * 100000
   ) |>
   filter(!is.na(taxa_deficit_jovem_masc),
          !is.na(taxa_mortes_violentas))
@@ -1219,9 +1398,6 @@ summary(series_taxas[, c("taxa_deficit_jovem_masc", "taxa_mortes_violentas")])
 # fator de escala entre as duas taxas
 fator_escala <- max(log(series_taxas$taxa_deficit_jovem_masc), na.rm = TRUE) /
   max(log(series_taxas$taxa_mortes_violentas), na.rm = TRUE)
-
-
-summary(lm(log(taxa_deficit_jovem_masc) ~ log(taxa_mortes_violentas), data = series_taxas))
 
 
 # Correlação de Pearson
@@ -1539,14 +1715,64 @@ repressao_mortes_acidentes_trabalho <- grafico_doc_trab+grafico_doc_trab_ac
 
 print(repressao_mortes_acidentes_trabalho)
 
+# Cálculo do Modelo de Regressão: acidentes de trabalho -> déficit
+modelo_deficit_ac_trabalho <- lm(taxa_deficit_media ~ tx_acdt_trabalho, data = analise_repressao_deficit)
+
+summary(modelo_deficit_ac_trabalho)
+resumo_lm_trabalho <- summary(modelo_deficit_ac_trabalho)
+
+# Preparação da Equação para o Gráfico: acidentes de trabalho -> déficit
+label_reg_deficit_trabalho <- paste0(
+  "y = ", round(coef(modelo_deficit_ac_trabalho)[1], 2), 
+  " + ", round(coef(modelo_deficit_ac_trabalho)[2], 2), "x\n",
+  "R² = ", round(resumo_lm_trabalho$r.squared, 3), "\n",
+  "p = ", format.pval(resumo_lm_trabalho$coefficients[2, 4], digits = 2)
+)
+
+# Geração do Gráfico de Regressão: acidentes de trabalho -> déficit
+grafico_regressao_trabalho_deficit <- ggplot(analise_repressao_deficit, aes(x = tx_acdt_trabalho, y = taxa_deficit_media)) +
+  geom_point(alpha = 0.7, size = 3, color = "#d62728", shape = 16) +
+  # Adiciona a linha de tendência com intervalo de confiança (se = TRUE)
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, color = "steelblue", fill = "steelblue") +
+  annotate(
+    "label",
+    x = Inf, y = -Inf,
+    label = label_reg_deficit_trabalho,
+    hjust = 1.05, vjust = -0.4,
+    size = 4,
+    color = "black",
+    fill = "white",
+    label.size = 0.5
+  ) +
+  labs(
+    title = "Intensidade do déficit demográfico é explicável por acidentes de trabalho",
+    subtitle = "Correlação entre déficit relativo médio e taxa de acidentes por 100k trabalhadores (1968–1991)",
+    x = "taxa de acidentes de trabalho (por 10⁵ trab.)",
+    y = "taxa média de déficit demográfico (%)"
+  ) +
+  theme_ipea() +
+  scale_x_continuous(labels = scales::label_number(decimal.mark = ",")) +
+  scale_y_continuous(labels = scales::label_number(decimal.mark = ","))
+
+# Exibir e Salvar
+print(grafico_regressao_trabalho_deficit)
+
+save_ipeaplot(
+  grafico_regressao_trabalho_deficit, 
+  "regressao_deficit_vs_acdt_trabalho",
+  path = pasta_saida, 
+  width = 9, 
+  height = 6,
+  format = c("png", "eps")
+)
 
 # =============================================================================
 # Migração como explicação alternativa dos déficits populacionais
 # =============================================================================
 
-#=======================================================================================
+#-------------------------------------------------------------------------------
 #dados migração
-#=======================================================================================
+#-------------------------------------------------------------------------------
 
 #erro censitário:
 omissao_censitaria <- data.frame(
@@ -1673,24 +1899,27 @@ saldo_migratorio_decada <- crescimento_decada |>
     saldo_migratorio = crescimento * participacao_migracao
   )
 
-
-#saldo migratório anual
-saldo_migratorio_anual <- pop_ano |>
+pop_ano <- pop_ano |>
   mutate(
     decada = floor(ano / 10) * 10
-  ) |>
-  left_join(
-    saldo_migratorio_decada |> 
-      dplyr::select(decada, saldo_migratorio),
-    by = "decada"
-  ) |>
+  )
+
+
+#saldo migratório anual
+saldo_migratorio_anual <- left_join(
+    pop_ano,  saldo_migratorio_decada, by = "decada", keep = NULL, suffix = c("", ""))
+
+
+saldo_migratorio_anual <- saldo_migratorio_anual |>
   group_by(decada) |>
   mutate(
-    crescimento_anual = populacao - lag(populacao),
+    crescimento_anual = exp(log(pop_final - pop_inicial)/10),
     peso = crescimento_anual / sum(crescimento_anual, na.rm = TRUE),
     saldo_migratorio_ano = saldo_migratorio * peso
   ) |>
   ungroup()
+
+plot(x = saldo_migratorio_anual$ano, y = saldo_migratorio_anual$saldo_migratorio_ano, type = "l")
 
 #distribuir linearmente o saldo migratório anual da década por ano
 
@@ -1731,6 +1960,7 @@ saldo_migratorio_anual_exponencial <- pop_ano |>
 saldo_1960 <- saldo_migratorio_decada |>
   filter(decada == 1950) |>
   pull(saldo_migratorio)
+
 
 cat("Saldo migratório da década de 1960:", format(saldo_1960, big.mark = ".", decimal.mark = ","), "\n\n")
 
@@ -2247,6 +2477,8 @@ pessoas_unicas_coorte <- pessoas_unicas_coorte |>
     peso = pmin(anos_exposicao / 10, 1),
     pessoas_unicas = pessoas_unicas * peso
   )
+
+mean(pessoas_unicas_coorte$anos_exposicao)
 
 total_pessoas_unicas <- pessoas_unicas_coorte |>
   summarise(
@@ -2858,18 +3090,16 @@ print(sintese_idades_regime)
 # Preparar dados (certifique-se de que taxa_migracao está presente)
 # ----------------------------------------------------------------------
 
-# Exemplo: se taxa_migracao estiver em dados_mediacao, faça o join
-dados_migracao_plot <- dados_impacto_regime %>%
-  left_join(
-    taxa_migracao %>% select(ano, taxa_migracao),
-    by = "ano"
-  ) %>%
-  filter(!is.na(taxa_migracao)) %>%
+dados_migracao_plot <- saldo_migratorio_anual_exponencial |>
+  mutate(regime_militar = ifelse(ano >= 1964 & ano <= 1985, 1, 0),
+         taxa_migracao = saldo_migratorio_ano*100000/populacao) |>
+  filter(!is.na(taxa_migracao)) |>
   mutate(
     regime_f = factor(regime_militar,
                       levels = c(0, 1),
                       labels = c("Fora do regime", "Durante o regime"))
   )
+
 
 # ----------------------------------------------------------------------
 # Gráfico: Taxa de migração ao longo do tempo, com retas separadas
@@ -3197,7 +3427,7 @@ grafico_final_hibrido_com_contra <- ggplot() +
 # Exibir
 print(grafico_final_hibrido_com_contra)
 
-save_ipeaplot(grafico_final_hibrido, "mortalidade implícita intercensitária 0-9 anos (spline híbrido)",
+save_ipeaplot(grafico_final_hibrido_com_contra, "mortalidade implícita intercensitária 0-9 anos (spline híbrido)",
               path = pasta_saida, 
               width = 10, 
               height = 6,
