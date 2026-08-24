@@ -15,6 +15,7 @@ library(tidyverse)
 library(lmtest)
 library(sandwich)
 library(tseries)
+library(splines)
 
 
 # =============================================================================
@@ -250,7 +251,10 @@ for (yr in seq_along(all_years)) {
   nascimentos[yr] <- TFT_anual[yr] * sum(pesos_fec * fem_pop_interp[yr, ] / widths)
 }
 
+
+
 df_raw$mortalidade_infantil
+
 # Mortalidade infantil (IMR) – interpolação anual 1930-1990
 imr_raw <- df_raw |>
   dplyr::select(ano, mortalidade_infantil) |>
@@ -264,14 +268,46 @@ imr_interp <- spline(imr_raw$ano, imr_raw$mortalidade_infantil,
 plot(imr_interp, type = "l")
 
 # =============================================================================
+# PROPORÇÃO DE IDOSOS (60+)
+# =============================================================================
+
+# Identificar colunas de homens e mulheres com 60+ (60-69, 70+)
+cols_60plus <- c(
+  "homens 60 a 69 anos", "homens 70 ou mais",
+  "mulheres 60 a 69 anos", "mulheres 70 ou mais"
+)
+
+# Extrair dos dados censitários (já corrigidos)
+pop_60plus_census <- numeric(length(census_years))
+for (i in seq_along(census_years)) {
+  ano <- census_years[i]
+  df_ano <- df_raw %>% filter(ano == !!ano)
+  if (nrow(df_ano) == 1) {
+    pop_60plus_census[i] <- sum(as.numeric(df_ano[cols_60plus]), na.rm = TRUE)
+  } else {
+    pop_60plus_census[i] <- NA
+  }
+}
+
+# Interpolação log-linear (exponencial) para todos os anos
+pop_60plus <- exp(approx(census_years, log(pop_60plus_census), xout = all_years)$y)
+
+# Proporção de idosos
+prop_idosos <- pop_60plus / pop_total
+
+# Verificar
+plot(all_years, prop_idosos, type = "l", main = "Proporção de idosos (60+)")
+
+
+# =============================================================================
 # 3. MIGRAÇÃO LÍQUIDA POR DÉCADA
 # =============================================================================
 
 # Participação do saldo migratório no crescimento populacional (%)
 mig_part <- data.frame(
-  periodo_inicio = c(1940, 1950, 1960, 1970, 1980),
-  periodo_fim    = c(1950, 1960, 1970, 1980, 1991),
-  participacao   = c(1.0, 3.4, 1.32, 0.9, 0.52) / 100
+  periodo_inicio = c(1930, 1940, 1950, 1960, 1970, 1980),
+  periodo_fim    = c(1940, 1950, 1960, 1970, 1980, 1991),
+  participacao   = c(NA, 1.0, 3.4, 1.32, 0.9, 0.52) / 100
 )
 
 # =============================================================================
@@ -279,6 +315,7 @@ mig_part <- data.frame(
 # =============================================================================
 
 periodos <- list(
+  "1930-1940" = c(1930,1940),
   "1940-1950" = c(1940,1950),
   "1950-1960" = c(1950,1960),
   "1960-1970" = c(1960,1970),
@@ -317,7 +354,7 @@ cat("Óbitos reconstruídos por década:\n")
 print(resultados %>% mutate(across(where(is.numeric), ~ round(., 0))))
 
 # =============================================================================
-# 5. ANUALIZAÇÃO DOS ÓBITOS (USANDO IMR)
+# 5. ANUALIZAÇÃO DOS ÓBITOS (USANDO IMR) – CORRIGIDO
 # =============================================================================
 
 obitos_anuais <- numeric(length(all_years))
@@ -337,91 +374,135 @@ for (i in 1:nrow(resultados)) {
     pesos <- imr_periodo / sum(imr_periodo)
   }
   
+  # Atribuir óbitos anuais
   obitos_anuais[all_years %in% anos] <- resultados$obitos[i] * pesos
 }
 
 # Taxa bruta de mortalidade observada
 CDR_obs <- obitos_anuais / pop_total
 
-
-
 # Verificação rápida
 if (any(is.na(obitos_anuais[1:30]))) {
   warning("obitos_anuais contém NAs nos primeiros anos. Verifique a conversão dos dados.")
 }
-
 # =============================================================================
-# 6. RELAÇÃO CDR ~ IMR NO PERÍODO PRÉ-1964
+# 6. RELAÇÃO CDR ~ IMR + PROP_IDOSOS (PERÍODO PRÉ-1964) – CORRIGIDO
 # =============================================================================
 
-# definição de anos prévios
 anos_pre <- 1940:1963
 ind_pre <- all_years %in% anos_pre
 
 dados_pre <- data.frame(
   ano = anos_pre,
   CDR = CDR_obs[ind_pre],
-  IMR = imr_interp[imr_years_all %in% anos_pre]
+  IMR = imr_interp[imr_years_all %in% anos_pre],
+  prop_idosos = prop_idosos[ind_pre]
 )
 
-#teste de cointegração
-coint.test(dados_pre$CDR, dados_pre$IMR + dados_pre$ano)
+# Criar a matriz de regressores com nomes de colunas
+xreg_pre <- cbind(log(dados_pre$IMR), log(dados_pre$prop_idosos))
+colnames(xreg_pre) <- c("log(IMR)", "log(prop_idosos)")
 
-plot(y = dados_pre$CDR, x = dados_pre$IMR)
-plot(y = dados_pre$CDR, x = dados_pre$ano, type = "l")
-plot(x = dados_pre$CDR, y = dados_pre$IMR)
+# Ajustar ARIMA
+modelo_cdr_imr_idosos <- auto.arima(
+  log(dados_pre$CDR),
+  xreg = xreg_pre
+)
 
-# como a cointegração não funcionou, optei por usar um arima automático mantendo 
-# a mortalidade infantil como preditora exógena
-modelo_cdr_imr <- auto.arima(dados_pre$CDR, xreg = dados_pre$IMR)
+summary(modelo_cdr_imr_idosos)
+coeftest(modelo_cdr_imr_idosos)
 
-summary(modelo_cdr_imr)
-
-coeftest(modelo_cdr_imr)
 
 # =============================================================================
-# 7. CENÁRIOS CONTRAFACTUAIS DE MORTALIDADE: MODELO LOG-LINEAR
+# 7.1 CONTRAFACTUAL DA IMR – REGRESSÃO SEGMENTADA (BREAKPOINT EM 1951.5)
 # =============================================================================
 
-# 7.1 Estimativa do contrafactual log-linear de mortalidade infantil
+library(segmented)
 
-# IMR histórica 1930-1960 para modelo log-linear
+# Dados históricos (1944-1963)
 imr_hist <- data.frame(
-  ano = seq(1944, 1963, 1),
-  IMR = imr_interp[imr_years_all %in% seq(from = 1944, to = 1963, by = 1)]
+  ano = 1940:1963,
+  IMR = imr_interp[imr_years_all %in% 1940:1963]
 )
 
-# Testes de cointegração
-coint.test(log(imr_hist$IMR), imr_hist$ano)
-coint.test(log(imr_hist$IMR), imr_hist$ano + imr_hist$ano^2 + imr_hist$ano^3 + imr_hist$ano^4 + imr_hist$ano^5)
+# 1. Ajuste do modelo segmentado (1 breakpoint)
+modelo_seg <- lm(log(IMR) ~ ano, data = imr_hist)
+seg_fit <- segmented(modelo_seg, seg.Z = ~ano, npsi = 2)
 
+# Exibir o breakpoint estimado (já rodou, mas mantemos para referência)
+print(summary(seg_fit))
 
-# modelo log-linear
-modelo_log <- lm(log(IMR) ~ ano, data = imr_hist)
-
-summary(modelo_log)
-
-# período de projeção
-
+# 2. Projeção para 1964-1985
 anos_regime <- 1964:1985
+newdata <- data.frame(ano = anos_regime)
 
-# modelo preditivo de tendência de mortalidade
+# 3. Previsão pontual e intervalos de confiança (90%)
+#    A função predict.segmented pode retornar se.fit, mas nem todas as versões.
+#    Vamos usar uma abordagem robusta: bootstrap paramétrico para obter intervalos.
+#    Isso também captura a incerteza do breakpoint.
 
-imr_model <- exp(predict(modelo_log, interval = "prediction", level = 0.95,
-                           newdata = data.frame(ano = anos_regime)))
-summary(imr_model)
+# Número de simulações bootstrap
+n_boot <- 1000
 
-# Intervalo de confiança e estimativa pontual
+# Matriz para armazenar as previsões
+pred_boot <- matrix(NA, nrow = length(anos_regime), ncol = n_boot)
 
-imr_central <- imr_model[, "fit"]
-imr_max     <- imr_model[, "lwr"]
-imr_min     <- imr_model[, "upr"]
+# Extrair coeficientes e matriz de covariância do modelo segmentado
+coefs <- coef(seg_fit)
+vcov_mat <- vcov(seg_fit)
 
-# Verificar
-plot(anos_regime, imr_central, type = "l", ylim = range(imr_min, imr_min),
-     main = "IMR contrafactual (1964-1985)", xlab = "Ano", ylab = "IMR")
+# Para cada bootstrap, simular coeficientes e prever
+set.seed(123)  # para reprodutibilidade
+for (b in 1:n_boot) {
+  # Simular coeficientes da distribuição normal multivariada
+  coef_sim <- MASS::mvrnorm(1, mu = coefs, Sigma = vcov_mat)
+  
+  # Construir a previsão para cada ano (usando a fórmula segmentada)
+  # O modelo segmentado tem a forma: b0 + b1*ano + psi*(ano - breakpoint)*I(ano > breakpoint)
+  # Acessamos os parâmetros pelo nome: coef_sim["(Intercept)"], etc.
+  psi <- coef_sim["U1.ano"]  # diferença de inclinação após o breakpoint
+  bp <- seg_fit$psi[1, "Est."]  # breakpoint estimado (fixo no bootstrap)
+  
+  # Previsão log(IMR) para cada ano
+  log_imr <- coef_sim["(Intercept)"] + coef_sim["ano"] * anos_regime
+  # Adicionar a mudança de inclinação para anos após o breakpoint
+  idx <- anos_regime > bp
+  log_imr[idx] <- log_imr[idx] + psi * (anos_regime[idx] - bp)
+  
+  pred_boot[, b] <- exp(log_imr)
+}
+
+# 4. Calcular a projeção central (mediana) e os percentis 5% e 95% (90% IC)
+imr_central <- apply(pred_boot, 1, median)
+imr_min     <- apply(pred_boot, 1, quantile, probs = 0.05)
+imr_max     <- apply(pred_boot, 1, quantile, probs = 0.95)
+
+# 5. (Opcional) Visualizar a projeção
+plot(anos_regime, imr_central, type = "l", ylim = range(imr_min, imr_max),
+     main = "IMR contrafactual (segmentada)", xlab = "Ano", ylab = "IMR")
 lines(anos_regime, imr_min, lty = 2)
 lines(anos_regime, imr_max, lty = 2)
+
+# =============================================================================
+# 7.1b Projeção contrafactual da proporção de idosos
+# =============================================================================
+
+# Dados históricos 1944-1963 (mesmo período da IMR)
+prop_hist <- data.frame(
+  ano = 1940:1963,
+  prop = prop_idosos[all_years %in% 1940:1963]
+)
+
+# Modelo log-linear (ou spline) – aqui optamos por log-linear para simplicidade
+modelo_prop <- lm(log(prop) ~ ano, data = prop_hist)
+
+# Projeção para 1964-1985
+anos_regime <- 1964:1985
+prop_contra <- exp(predict(modelo_prop, newdata = data.frame(ano = anos_regime)))
+
+# (Opcional) visualizar
+plot(anos_regime, prop_contra, type = "l", col = "blue")
+lines(anos_regime, prop_idosos[all_years %in% anos_regime], col = "red")
 
 #-----------------------------------------------------------------------------
 # 7.2 VISUALIZAÇÃO DA MORTALIDADE INFANTIL – OBSERVADA E CONTRAFACTUAL
@@ -481,7 +562,7 @@ ggplot() +
   theme(legend.position = "bottom")
 
 #-----------------------------------------------------------------------------
-# 7.3  EXCESSO DE MORTALIDADE INFANTIL – MODELO LOG‑LINEAR
+# 7.3  EXCESSO DE MORTALIDADE INFANTIL
 #-----------------------------------------------------------------------------
 # 1. Vetor de anos do regime (já definido)
 anos_regime <- 1964:1985
@@ -556,27 +637,64 @@ ggplot(tabela_imr_excesso, aes(x = Ano, y = Excesso_Central)) +
   ) +
   theme_minimal()
 
-#-----------------------------------------------------------------------------
-# 7.4 CÁLCULO DO EXCESSO DE MORTALIDADE GERAL
-#-----------------------------------------------------------------------------
-
+# =============================================================================
+# 7.4 CÁLCULO DO EXCESSO DE MORTALIDADE GERAL (COM PROP_IDOSOS)
+# =============================================================================
 
 ind_regime <- all_years %in% anos_regime
 pop_regime <- pop_total[ind_regime]
-obitos_regime <- obitos_anuais[ind_regime]
 
-#função para alcular o excesso 
-calcular_excesso <- function(imr_contra) {
-  CDR_contra <- forecast(modelo_cdr_imr,  xreg = imr_contra) 
-  obitos_esperados <- CDR_contra$mean * pop_regime
+# Óbitos observados (já suavizados ou brutos – você usou brutos)
+
+
+obitos_regime_bruto <- obitos_anuais[ind_regime]
+
+# SUAVIZAÇÃO DE obitos_regime COM LOESS
+
+# 1. Criar um data.frame com os dados
+dados_obitos <- data.frame(
+  ano = anos_regime,
+  obitos = obitos_regime_bruto
+)
+
+# 2. Ajustar LOESS (span = 0.75 é um valor razoável; ajuste conforme necessário)
+span <- 0.75
+loess_fit <- loess(obitos ~ ano, data = dados_obitos, span = span, degree = 1)
+
+# 3. Obter valores suavizados (fitted) e, se desejar, intervalo de confiança
+dados_obitos$obitos_suav <- predict(loess_fit, se = TRUE)$fit
+dados_obitos$se <- predict(loess_fit, se = TRUE)$se.fit
+
+# 4. Visualizar a suavização (opcional)
+ggplot(dados_obitos, aes(x = ano)) +
+  geom_line(aes(y = obitos, color = "Observado"), size = 0.8) +
+  geom_line(aes(y = obitos_suav, color = "Suavizado (LOESS)"), size = 1.2) +
+  geom_ribbon(aes(ymin = obitos_suav - 1.96*se, ymax = obitos_suav + 1.96*se),
+              alpha = 0.2, fill = "blue") +
+  labs(title = "Suavização LOESS dos óbitos observados (1964-1985)",
+       y = "Óbitos", x = "Ano") +
+  scale_color_manual(values = c("Observado" = "black", "Suavizado (LOESS)" = "red")) +
+  theme_minimal()
+
+
+obitos_regime <- dados_obitos$obitos_suav
+
+calcular_excesso <- function(imr_contra, prop_contra) {
+  xreg_contra <- cbind(log(imr_contra), log(prop_contra))
+  colnames(xreg_contra) <- c("log(IMR)", "log(prop_idosos)")
+  
+  pred_cdr <- forecast(modelo_cdr_imr_idosos, xreg = xreg_contra)
+  CDR_contra <- exp(pred_cdr$mean)
+  obitos_esperados <- CDR_contra * pop_regime
   excesso <- obitos_regime - obitos_esperados
-  total <- sum(excesso)
-  list(excesso_anual = excesso, total = total)
+  list(excesso_anual = excesso, total = sum(excesso), CDR_contra = CDR_contra)
 }
 
-excesso_max <- calcular_excesso(imr_max)   # queda máxima de mortalidade 
-excesso_central <- calcular_excesso(imr_central) #tendência central
-excesso_min <- calcular_excesso(imr_min)   # queda mínima de mortalidade
+
+# Calcular cenários
+excesso_max <- calcular_excesso(imr_max, prop_contra)
+excesso_central <- calcular_excesso(imr_central, prop_contra)
+excesso_min <- calcular_excesso(imr_min, prop_contra)
 
 # ----------------------------------------------------------------------------
 # 7.5 RESULTADOS
@@ -590,17 +708,21 @@ cat(sprintf("Excesso de mortalidade 1964–1985 (cenário central): %0.0f óbito
 cat(sprintf("Excesso de mortalidade 1964–1985 (cenário mínimo): %0.0f óbitos\n",
             excesso_min$total))
 
-pred_min <-  forecast(modelo_cdr_imr,  xreg = imr_min)
-pred_central <- forecast(modelo_cdr_imr,  xreg = imr_central)
-pred_max <- forecast(modelo_cdr_imr,  xreg = imr_max)
+# Previsões da CDR para cada cenário
+pred_max <- exp(forecast(modelo_cdr_imr_idosos, 
+                         xreg = cbind(log(imr_max), log(prop_contra)))$mean)
+pred_central <- exp(forecast(modelo_cdr_imr_idosos, 
+                             xreg = cbind(log(imr_central), log(prop_contra)))$mean)
+pred_min <- exp(forecast(modelo_cdr_imr_idosos, 
+                         xreg = cbind(log(imr_min), log(prop_contra)))$mean)
 
-# Tabela anual do excesso
+# Tabela anual
 resultado_anual <- data.frame(
   Ano = anos_regime,
   Observado = round(obitos_regime, 0),
-  Esperado_Min = round(pred_max$mean * pop_regime, 0),
-  Esperado_Max = round(pred_min$mean * pop_regime, 0),
-  Esperado_Central = round(pred_central$mean * pop_regime, 0),
+  Esperado_Min = round(pred_min * pop_regime, 0),
+  Esperado_Central = round(pred_central * pop_regime, 0),
+  Esperado_Max = round(pred_max * pop_regime, 0),
   Excesso_Max = round(excesso_max$excesso_anual, 0),
   Excesso_Central = round(excesso_central$excesso_anual, 0),
   Excesso_Min = round(excesso_min$excesso_anual, 0)
@@ -608,21 +730,20 @@ resultado_anual <- data.frame(
 
 print(resultado_anual)
 
-# Visualização
+# Gráfico
 dat_plot <- resultado_anual %>%
   dplyr::select(Ano, Observado, Esperado_Min, Esperado_Central, Esperado_Max) %>%
   pivot_longer(-Ano, names_to = "Cenário", values_to = "Óbitos") %>%
-  mutate(`Óbitos (mil)` = `Óbitos` / 1000)
+  mutate(`Óbitos (mil)` = Óbitos / 1000)
 
 grafico_coorte_componente <- ggplot(dat_plot, aes(x = Ano, y = `Óbitos (mil)`, color = Cenário)) +
   geom_line(size = 1) +
-  labs(title = "Óbitos anuais observados e contrafactuais (1964–1985)", 
-       subtitle = "Coorte-componente com projeção log-linear (tendência 46-63)",
+  labs(title = "Óbitos anuais observados e contrafactuais (com prop_idosos)", 
+       subtitle = "Modelo ARIMA com IMR e proporção de idosos",
        y = "Óbitos (milhares)") +
   theme_minimal()
 
 print(grafico_coorte_componente)
-
 save_ipeaplot(grafico_coorte_componente, "Gráfico de coorte-componente contrafactual",
               format = c("eps", "png"))
 
@@ -636,8 +757,8 @@ save_ipeaplot(grafico_coorte_componente, "Gráfico de coorte-componente contrafa
 # 1. Preparar os dados (1930–1985)
 # Supondo que 'imr_interp' seja a série interpolada de mortalidade infantil
 dados_its <- data.frame(
-  ano = 1944:1985,
-  imr = imr_interp[15:56]  # ajuste o índice conforme sua série
+  ano = 1950:1985,
+  imr = imr_interp[21:56]  # ajuste o índice conforme sua série
 ) %>%
 
   filter(!is.na(imr))
@@ -651,7 +772,7 @@ ano_interrupcao <- 1964
 
 dados_its <- dados_its %>%
   mutate(
-    tempo = ano - 1944,                    # variável contínua (centrado)
+    tempo = ano - 1950,                    # variável contínua (centrado)
     interrupcao = ifelse(ano >= ano_interrupcao, 1, 0),
     tempo_pos = ifelse(ano >= ano_interrupcao, ano - ano_interrupcao, 0)
   )
@@ -761,23 +882,27 @@ p_interrupcao    <- tabela_coefs["interrupcao", "Pr(>|z|)"]
 beta_tempo_pos   <- tabela_coefs["tempo_pos", "Estimate"]
 p_tempo_pos      <- tabela_coefs["tempo_pos", "Pr(>|z|)"]
 
+
+# Descomente se quiser excluir coeficientes sem significância, 
+# ou deixe assim para calcular tudo junto
+
 # 2. Definir nível de significância (ex: alfa = 0.05)
-alpha <- 0.05
+#alpha <- 0.05
 
 # Aplicar a condição: se não for significativo (p >= alpha), o efeito vira 0
-if (p_interrupcao >= alpha) {
-  cat(sprintf("Aviso: Coeficiente 'interrupcao' não significativo (p = %.3f). Tratado como 0.\n", p_interrupcao))
-  beta_interrupcao <- 0
-} else {
-  cat(sprintf("Coeficiente 'interrupcao' significativo (p = %.3f).\n", p_interrupcao))
-}
+#if (p_interrupcao >= alpha) {
+#  cat(sprintf("Aviso: Coeficiente 'interrupcao' não significativo (p = %.3f). Tratado como 0.\n", p_interrupcao))
+#  beta_interrupcao <- 0
+#} else {
+#  cat(sprintf("Coeficiente 'interrupcao' significativo (p = %.3f).\n", p_interrupcao))
+#}
 
-if (p_tempo_pos >= alpha) {
-  cat(sprintf("Aviso: Coeficiente 'tempo_pos' não significativo (p = %.3f). Tratado como 0.\n", p_tempo_pos))
-  beta_tempo_pos <- 0
-} else {
-  cat(sprintf("Coeficiente 'tempo_pos' significativo (p = %.3f).\n", p_tempo_pos))
-}
+#if (p_tempo_pos >= alpha) {
+#  cat(sprintf("Aviso: Coeficiente 'tempo_pos' não significativo (p = %.3f). Tratado como 0.\n", p_tempo_pos))
+#  beta_tempo_pos <- 0
+#} else {
+#  cat(sprintf("Coeficiente 'tempo_pos' significativo (p = %.3f).\n", p_tempo_pos))
+#}
 
 # 3. Preparar vetores para os anos do regime (1964–1985)
 anos_regime <- 1964:1985
@@ -832,630 +957,187 @@ print(its_excess)
 ggsave("ITS_excess_plot.png", plot = its_excess)
 
 # =============================================================================
-# 8. PROJEÇÃO ARIMA PRÉ-1964 – EXCESSO DE MORTALIDADE INFANTIL
-# Ajuste do modelo com dados de 1945-1963 e projeção para 1964-1985
+# VALIDAÇÃO EXTERNA: EXPECTATIVA DE VIDA CONTRAFACTUAL (SPLINE)
 # =============================================================================
 
-library(forecast)
-library(ggplot2)
-library(dplyr)
+library(splines)
 
-# 1. Preparar a série histórica (1945–1963)
-anos_hist <- 1944:1963
-imr_hist <- imr_interp[imr_years_all %in% anos_hist]  # IMR observada no período pré-regime
-
-# Criar um objeto ts
-serie_hist <- ts(imr_hist, start = 1944, frequency = 1)
-
-# 2. Ajustar modelo ARIMA automaticamente (seleção por AICc)
-modelo_arima_pre <- auto.arima(serie_hist)  # dados anuais, sem sazonalidade
-
-# Resumo do modelo
-cat("Modelo ARIMA ajustado ao período 1945-1963:\n")
-print(summary(modelo_arima_pre))
-
-# 3. Projetar para 1964–1985 (22 anos) com intervalo de 95%
-h <- 22
-# Para obter dois níveis (ex: 80% e 95%), especifique level = c(80, 95)
-# Se quiser apenas 95%, use level = 95, mas acesse [,1]
-projecao <- forecast(modelo_arima_pre,  
-                     bootstrap = TRUE, h = h, level = c(80, 95))
-
-# Extrair a projeção (valores centrais)
-imr_projetado <- as.numeric(projecao$mean)
-
-# Intervalo de 95% (segunda coluna, pois a primeira é 80%)
-imr_projetado_inf <- as.numeric(projecao$lower[, 2])   # 95% inferior
-imr_projetado_sup <- as.numeric(projecao$upper[, 2])   # 95% superior
-
-# (Caso tenha usado level = 95 apenas, use [,1])
-# imr_projetado_inf <- as.numeric(projecao$lower[, 1])
-# imr_projetado_sup <- as.numeric(projecao$upper[, 1])
-
-anos_proj <- 1964:1985
-
-# 4. Preparar dados observados para o mesmo período
-ind_obs <- imr_years_all %in% anos_proj
-imr_observado <- imr_interp[ind_obs]
-
-# 5. Calcular o excesso de IMR (observado - projetado) ano a ano
-excesso_imr <- imr_observado - imr_projetado
-excesso_imr_inf <- imr_observado - imr_projetado_sup   # inversão (inferior do excesso)
-excesso_imr_sup <- imr_observado - imr_projetado_inf   # superior do excesso
-
-# Excesso acumulado (soma das diferenças)
-excesso_acumulado_imr <- sum(excesso_imr)
-
-cat("\n======================== RESULTADOS ========================\n")
-cat(sprintf("Excesso acumulado de IMR (1964–1985): %0.2f óbitos por 1.000 NV\n", 
-            excesso_acumulado_imr))
-
-# 6. Converter o excesso de IMR em excesso de óbitos usando a relação CDR ~ IMR
-#    (modelo_cdr_imr já foi estimado com dados de 1940-1963)
-#    e a população real do período.
-
-# Para cada ano, prever a CDR a partir da IMR projetada e observada
-ind_regime <- all_years %in% anos_proj
-pop_regime <- pop_total[ind_regime]
-
-# CDR esperada (projetada)
-CDR_projetado <- forecast(modelo_cdr_imr, xreg = imr_projetado)
-
-# CDR observada (real)
-CDR_observado <- forecast(modelo_cdr_imr, xreg = imr_observado)
-
-# Óbitos esperados (projetados)
-obitos_esperados <- CDR_projetado$mean * pop_regime
-
-# Óbitos observados (reais)
-obitos_observados <- CDR_observado$mean * pop_regime
-
-# Excesso de óbitos anual
-excesso_obitos <- obitos_observados - obitos_esperados
-
-# Excesso total de óbitos
-excesso_total_obitos <- sum(excesso_obitos)
-
-cat(sprintf("\nExcesso total de óbitos (1964–1985): %0.0f\n", excesso_total_obitos))
-cat("=============================================================\n")
-
-# 7. Tabela anual com os resultados
-tabela_resultados <- data.frame(
-  Ano = anos_proj,
-  IMR_Observado = round(imr_observado, 2),
-  IMR_Projetado = round(imr_projetado, 2),
-  IMR_Projetado_inf = round(imr_projetado_inf, 2),
-  IMR_Projetado_sup = round(imr_projetado_sup, 2),
-  Excesso_IMR = round(excesso_imr, 2),
-  Excesso_IMR_inf = round(excesso_imr_inf, 2),
-  Excesso_IMR_sup = round(excesso_imr_sup, 2),
-  Obitos_Observados = round(obitos_observados, 0),
-  Obitos_Esperados = round(obitos_esperados, 0),
-  Excesso_Obitos = round(excesso_obitos, 0)
+# 1. Dados históricos (período 1944-1963)
+anos_pre_e0 <- 1940:1963
+ind_pre_e0 <- life_expec_years_all %in% anos_pre_e0
+e0_hist <- data.frame(
+  ano = anos_pre_e0,
+  e0 = life_expec_interp[ind_pre_e0]
 )
 
-print(tabela_resultados)
+# 2. Ajustar modelo com spline (3 graus de liberdade)
+#    Usamos log(e0) para estabilizar a variância, mas podemos tentar e0 diretamente.
+modelo_e0_spline <- lm(log(e0) ~ ns(ano, df = 3), data = e0_hist)
+summary(modelo_e0_spline)
 
-# 8. Gráficos
+# Verificar resíduos
+par(mfrow = c(2,2))
+plot(modelo_e0_spline)
 
-# a) IMR observada vs. projetada (com intervalo)
-dados_grafico <- data.frame(
-  Ano = c(anos_hist, anos_proj),
-  IMR = c(imr_hist, imr_observado),
-  Tipo = c(rep("Histórico", length(anos_hist)), rep("Observado", length(anos_proj)))
+# 3. Projetar e0 contrafactual para 1964-1985
+anos_regime <- 1964:1985
+newdata <- data.frame(ano = anos_regime)
+e0_contra <- exp(predict(modelo_e0_spline, newdata))
+
+# 4. e0 observada
+ind_obs_e0 <- which(life_expec_years_all %in% anos_regime)
+e0_obs <- life_expec_interp[ind_obs_e0]
+
+# 5. Diferença: observado - contrafactual (negativo = perda)
+diferenca_e0 <- e0_obs - e0_contra
+
+# 6. Perda absoluta em pessoa-anos (apenas quando a diferença é negativa)
+#    Em geral, a diferença será negativa em todos os anos; mas usamos pmax para segurança.
+perda_pessoa_anos <- sum(pmax(-diferenca_e0, 0) * pop_total[all_years %in% anos_regime])
+
+# 7. Óbitos equivalentes: perda dividida pela expectativa de vida média no período
+#    Usamos a média da e0 observada no regime como proxy da idade média ao morrer.
+media_e0_regime <- mean(e0_contra)
+obitos_equivalentes <- perda_pessoa_anos / media_e0_regime
+
+# 8. Resultados
+cat("\n========== VALIDAÇÃO EXTERNA (SPLINE) ==========\n")
+cat(sprintf("Perda acumulada de expectativa de vida: %0.2f anos\n", -sum(diferenca_e0)))
+
+# 9. Comparação com o excesso central
+cat("\n--- Comparação com o excesso estimado pelo modelo CDR~IMR ---\n")
+cat(sprintf("Excesso de mortalidade (central) do modelo principal: %0.0f óbitos\n", 
+            excesso_central$total))
+cat(sprintf("Razão (validação / modelo principal): %0.2f\n", 
+            obitos_equivalentes / excesso_central$total))
+
+# 11. Gráfico da diferença anual (observado - contrafactual)
+df_e0 <- data.frame(
+  ano = anos_regime,
+  e0_obs = e0_obs,
+  e0_contra = e0_contra,
+  diferenca = diferenca_e0
 )
 
-dados_proj <- data.frame(
-  Ano = anos_proj,
-  IMR_proj = imr_projetado,
-  inf = imr_projetado_inf,
-  sup = imr_projetado_sup
+ggplot(df_e0, aes(x = ano)) +
+  geom_line(aes(y = e0_obs, color = "Observado"), size = 1) +
+  geom_line(aes(y = e0_contra, color = "Contrafactual"), linetype = "dashed", size = 1) +
+  labs(title = "Expectativa de vida ao nascer – observada vs. contrafactual",
+       subtitle = "Projeção log-linear com base na tendência 1944-1963",
+       y = "e₀ (anos)", x = "Ano") +
+  scale_color_manual(values = c("Observado" = "black", "Contrafactual" = "red")) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# 12. Gráfico da diferença anual (excesso/perda de e₀)
+ggplot(df_e0, aes(x = ano, y = diferenca)) +
+  geom_col(aes(fill = diferenca < 0), alpha = 0.7) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "blue"), 
+                    labels = c("Ganho", "Perda")) +
+  labs(title = "Diferença anual na expectativa de vida (observado - contrafactual)",
+       subtitle = "Valores negativos indicam perda de anos de vida",
+       y = "Diferença em anos", x = "Ano") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+
+# =============================================================================
+# ESTUDO DE SÉRIE TEMPORAL INTERROMPIDA (ITS) – EXPECTATIVA DE VIDA
+# Interrupção em 1964 – início do regime militar
+# =============================================================================
+
+life_expectancy_raw <- df_raw |>
+  dplyr::select(ano, expectativa_vida) |>
+  filter(!is.na(expectativa_vida)) |>
+  arrange(ano)
+
+life_expec_years_all <- 1930:2010
+life_expec_interp <- spline(life_expectancy_raw$ano, life_expectancy_raw$expectativa_vida,
+                            xout = life_expec_years_all, method = "natural")$y
+
+plot(life_expec_interp, type = "l")
+
+
+# 1. Preparar os dados (1940–1985)
+# Como os dados são decenais e interpolados, a interrumpção é na década anterior
+dados_its_e0 <- data.frame(
+  ano = 1950:1985,
+  e0 = life_expec_interp[life_expec_years_all %in% 1950:1985]
+) %>%
+  filter(!is.na(e0))
+
+# 2. Criar variáveis para o modelo ITS
+ano_interrupcao <- 1964
+
+dados_its_e0 <- dados_its_e0 %>%
+  mutate(
+    tempo = ano - 1950,                    # variável contínua (centrado)
+    interrupcao = ifelse(ano >= ano_interrupcao, 1, 0),
+    tempo_pos = ifelse(ano >= ano_interrupcao, ano - ano_interrupcao, 0)
+  )
+
+# 3. Ajuste do modelo ITS por mínimos quadrados (OLS)
+modelo_its_e0 <- lm(log(e0) ~ tempo + interrupcao + tempo_pos, data = dados_its_e0)
+summary(modelo_its_e0)
+
+# 4. Verificar autocorrelação dos resíduos (teste Durbin-Watson)
+dwtest(modelo_its_e0)  # se p < 0.05, há autocorrelação
+
+# 5. Opção 1: Erros padrão robustos (Newey-West)
+coeftest(modelo_its_e0, vcov = NeweyWest(modelo_its_e0, lag = 1, prewhite = FALSE))
+#O estimador de Newey-West calcula erros-padrão HAC (Heteroskedasticity and Autocorrelation Consistent), 
+# corrigindo simultaneamente a heterocedasticidade e a autocorrelação (correlação serial) nos resíduos de um modelo de regressão.
+
+
+# Opção 2: Ajustar modelo ARIMAX com regressores
+serie_e0_ts <- ts(dados_its_e0$e0, start = 1940, frequency = 1)
+
+xreg_e0 <- cbind(
+  tempo = dados_its_e0$tempo,
+  interrupcao = dados_its_e0$interrupcao,
+  tempo_pos = dados_its_e0$tempo_pos
 )
 
-ggplot() +
-  geom_line(data = dados_grafico, aes(x = Ano, y = IMR, color = Tipo), size = 1) +
-  geom_ribbon(data = dados_proj, aes(x = Ano, ymin = inf, ymax = sup),
-              fill = "lightblue", alpha = 0.4) +
-  geom_line(data = dados_proj, aes(x = Ano, y = IMR_proj, color = "Projetado (ARIMA)"),
+modelo_arimax_e0 <- auto.arima(serie_e0_ts, xreg = xreg_e0, 
+                               stepwise = FALSE, approximation = FALSE)
+summary(modelo_arimax_e0)
+coeftest(modelo_arimax_e0)
+
+# 6. Coeficientes e efeitos (usando o ARIMAX, que corrige autocorrelação)
+coefs_e0 <- coef(modelo_arimax_e0)
+beta_interrupcao_e0 <- coefs_e0["interrupcao"]
+beta_tempo_pos_e0   <- coefs_e0["tempo_pos"]
+
+efeito_imediato_e0 <- beta_interrupcao_e0
+efeito_tendencia_e0 <- beta_tempo_pos_e0
+efeito_acumulado_e0 <- beta_interrupcao_e0 + beta_tempo_pos_e0 * 21
+
+cat("\n========== ITS – EXPECTATIVA DE VIDA ==========\n")
+cat(sprintf("Efeito imediato (1964): %0.3f anos\n", efeito_imediato_e0))
+cat(sprintf("Mudança na tendência anual: %0.3f anos/ano\n", efeito_tendencia_e0))
+cat(sprintf("Efeito acumulado 1964–1985: %0.3f anos\n", efeito_acumulado_e0))
+
+
+
+# 7. Gráfico: série observada e ajustada pelo ARIMAX
+dados_its_e0$ajustado_arimax <- fitted(modelo_arimax_e0)
+
+ggplot(dados_its_e0, aes(x = ano)) +
+  geom_line(aes(y = e0, color = "Observado"), size = 1) +
+  geom_line(aes(y = ajustado_arimax, color = "Ajustado (ARIMAX)"), 
             size = 1, linetype = "dashed") +
-  geom_vline(xintercept = 1964, linetype = "dotted", color = "red") +
-  annotate("text", x = 1964, y = max(imr_hist) * 0.9,
-           label = "Início do regime militar", color = "red", hjust = -0.1) +
-  scale_color_manual(values = c("Histórico" = "black",
-                                "Observado" = "darkgreen",
-                                "Projetado (ARIMA)" = "blue")) +
-  labs(title = "Mortalidade infantil – observada vs. projetada (ARIMA pré-1964)",
-       subtitle = "Projeção baseada na tendência 1945-1963",
-       x = "Ano", y = "IMR (óbitos por 1.000 nascidos vivos)") +
-  theme_minimal()
-
-# b) Excesso anual de óbitos
-ggplot(tabela_resultados, aes(x = Ano, y = Excesso_Obitos / 1000)) +
-  geom_col(fill = ifelse(tabela_resultados$Excesso_Obitos > 0, "red", "blue"), alpha = 0.6) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(title = "Excesso anual de óbitos (ARIMA pré-1964)",
-       subtitle = "Diferença entre óbitos observados e esperados (1964-1985)",
-       x = "Ano", y = "Excesso (milhares de óbitos)") +
-  theme_minimal()
-
-# 9. Diagnóstico do modelo ARIMA
-cat("\nDiagnóstico do modelo ARIMA:\n")
-checkresiduals(modelo_arima_pre)
-
-# Teste de Ljung-Box para autocorrelação residual
-print(Box.test(residuals(modelo_arima_pre), lag = 10, type = "Ljung-Box"))
-
-cat("Excesso acumulado de mortalidade infantil: ", sum(pmax(tabela_resultados$Excesso_Obitos, 0)))
-
-# -----------------------------------------------------------------------------
-# 8.1. ESTIMAÇÃO DO EXCESSO DE MORTALIDADE GERAL USANDO ARIMAX (CONTRAFACTUAL)
-# ----------------------------------------------------------------------------
-
-library(forecast)
-library(dplyr)
-
-# 1. Preparar a série histórica da IMR pré-regime (1930–1963) para projeção contrafactual
-anos_hist_arimax <- 1944:1963
-imr_hist_ts <- ts(imr_interp[imr_years_all %in% anos_hist_arimax], frequency = 1)
-
-# 2. Ajustar um modelo ARIMA univariado na série histórica (tendência contrafactual pura)
-modelo_arima_contra <- auto.arima(imr_hist_ts, stepwise = FALSE, approximation = FALSE)
-
-# 3. Projetar a IMR contrafactual para o período do regime militar (1964–1985)
-# Número de períodos a projetar: 1985 - 1964 + 1 = 22 anos
-# Utilizando forecast::forecast explicitamente para evitar conflitos de namespace
-proj_arimax <- forecast::forecast(modelo_arima_contra, h = 22, level = 95, bootstrap = TRUE)
-
-imr_central_arimax <- as.numeric(proj_arimax$mean)
-imr_min_arimax     <- as.numeric(proj_arimax$lower) # Limite inferior da projeção
-imr_max_arimax     <- as.numeric(proj_arimax$upper) # Limite superior da projeção
-
-# 4. Função adaptada para calcular o excesso de mortalidade geral via ARIMAX
-calcular_excesso_arimax <- function(imr_contra_vec) {
-  CDR_contra <- forecast(modelo_cdr_imr, xreg = imr_contra_vec)
-  obitos_esperados <- CDR_contra$mean * pop_regime
-  excesso <- obitos_regime - obitos_esperados
-  total <- sum(excesso)
-  list(excesso_anual = excesso, total = total)
-}
-
-excesso_min_arimax     <- calcular_excesso_arimax(imr_max_arimax)
-excesso_central_arimax <- calcular_excesso_arimax(imr_central_arimax)
-excesso_max_arimax     <- calcular_excesso_arimax(imr_min_arimax)
-
-# ----------------------------------------------------------------------------
-# 8.2. RESULTADOS DO MODELO ARIMAX
-# ----------------------------------------------------------------------------
-
-cat("\n=================== RESULTADOS: ESTIMATIVA ARIMAX ===================\n")
-cat(sprintf("Excesso de mortalidade geral 1964–1985 (cenário máximo): %0.0f óbitos\n",
-            excesso_max_arimax$total))
-cat(sprintf("Excesso de mortalidade geral 1964–1985 (cenário central): %0.0f óbitos\n",
-            excesso_central_arimax$total))
-cat(sprintf("Excesso de mortalidade geral 1964–1985 (cenário mínimo): %0.0f óbitos\n",
-            excesso_min_arimax$total))
-
-pred_arima_min <- forecast(modelo_cdr_imr, xreg = imr_min_arimax)
-pred_arima_central <- forecast(modelo_cdr_imr, xreg = imr_central_arimax)
-pred_arima_max <- forecast(modelo_cdr_imr, xreg = imr_max_arimax)
-
-# Tabela anual do excesso com ARIMAX
-resultado_anual_arimax <- data.frame(
-  Ano = anos_regime,
-  Observado = round(obitos_regime, 0),
-  Esperado_Max = round(pred_arima_max$mean * pop_regime, 0),
-  Esperado_Min = round(pred_arima_min$mean * pop_regime, 0),
-  Esperado_Central = round(pred_arima_central$mean * pop_regime, 0),
-  Excesso_Max = round(excesso_max_arimax$excesso_anual, 0),
-  Excesso_Central = round(excesso_central_arimax$excesso_anual, 0),
-  Excesso_Min = round(excesso_min_arimax$excesso_anual, 0)
-)
-
-print(resultado_anual_arimax)
-
-# Visualização gráfica do excesso com ARIMAX
-dat_plot_arimax <- resultado_anual_arimax %>%
-  dplyr::select(Ano, Observado, Esperado_Min, Esperado_Central, Esperado_Max) %>%
-  pivot_longer(-Ano, names_to = "Cenário", values_to = "Óbitos") %>%
-  mutate(`Óbitos (mil)` = `Óbitos` / 1000)
-
-grafico_arimax_geral <- ggplot(dat_plot_arimax, aes(x = Ano, y = `Óbitos (mil)`, color = Cenário)) +
-  geom_line(size = 1) +
-  labs(title = "Óbitos anuais observados e contrafactuais (1964–1985)", 
-       subtitle = "Estimativa de excesso de mortalidade geral via projeção ARIMAX",
-       y = "Óbitos (milhares)",
-       x = "Ano") +
-  theme_minimal()
-
-print(grafico_arimax_geral)
-
-
-# =============================================================================
-# VISUALIZAÇÃO COMPLETA DA ANÁLISE PRINCIPAL (PRÉ-SENSIBILIDADE)
-# =============================================================================
-
-library(ggplot2)
-library(dplyr)
-library(tidyr)
-library(gridExtra)
-library(knitr)
-library(scales)
-
-# -----------------------------------------------------------------------------
-# 1. TABELA RESUMO DOS EXCESSOS (INFANTIL E GERAL) – POR MÉTODO
-# -----------------------------------------------------------------------------
-
-# Excesso infantil (log-linear) – já calculado em 7.3
-# Temos: excesso_pos_acum_central, excesso_pos_acum_min, excesso_pos_acum_max (em IMR)
-# E também a conversão para óbitos absolutos (usando nascimentos)
-# O código original já fez: tibble(..., c(sum(nascimentos[35:56]*(excesso_pos_central/100)), ...))
-
-# Vamos extrair esses valores do ambiente
-# Se não estiverem salvos, recalcular:
-if (!exists("excesso_infantil_abs_central")) {
-  # Recalcular a partir dos dados existentes
-  ind_regime <- all_years %in% 1964:1985
-  nasc_regime <- nascimentos[ind_regime]
-  
-  excesso_infantil_abs_central <- sum(nasc_regime * (excesso_pos_central / 1000))  # já está em óbitos
-  excesso_infantil_abs_min <- sum(nasc_regime * (excesso_pos_min / 1000))
-  excesso_infantil_abs_max <- sum(nasc_regime * (excesso_pos_max / 1000))
-}
-
-# Excesso geral (log-linear) – já calculado em 7.5
-# excesso_central$total, excesso_min$total, excesso_max$total
-
-# Excesso infantil e geral pelo método ARIMA (seção 8)
-# Temos: excesso_acumulado_imr (em IMR) e excesso_total_obitos (geral)
-# Também temos tabela_resultados com excesso de IMR e óbitos por ano
-# Para o ARIMA, o excesso infantil absoluto pode ser calculado a partir da tabela
-if (exists("tabela_resultados")) {
-  excesso_infantil_abs_arima <- sum(tabela_resultados$Excesso_Obitos, na.rm = TRUE)  # já é óbitos
-} else {
-  excesso_infantil_abs_arima <- NA
-}
-
-# Tabela de resumo
-tabela_resumo <- data.frame(
-  Método = c("Log-linear (central)", "Log-linear (mínimo)", "Log-linear (máximo)",
-             "ARIMA (central)"),
-  `Excesso infantil (óbitos)` = c(excesso_infantil_abs_central,
-                                  excesso_infantil_abs_min,
-                                  excesso_infantil_abs_max,
-                                  excesso_infantil_abs_arima),
-  `Excesso geral (óbitos)` = c(excesso_central$total,
-                               excesso_min$total,
-                               excesso_max$total,
-                               if (exists("excesso_total_obitos")) excesso_total_obitos else NA)
-)
-
-# Arredondar
-tabela_resumo <- tabela_resumo %>%
-  mutate(across(where(is.numeric), ~ round(., 0)))
-
-# Exibir no console
-cat("\n========== TABELA RESUMO DOS EXCESSOS ==========\n")
-print(tabela_resumo)
-
-# -----------------------------------------------------------------------------
-# 2. GRÁFICO DA IMR OBSERVADA E CONTRAFACTUAL (LOG-LINEAR)
-# -----------------------------------------------------------------------------
-
-# Dados observados (1930–1985)
-dados_obs <- data.frame(
-  ano = 1930:1985,
-  IMR = imr_interp[1:56]  # índices 1:56 correspondem a 1930:1985
-) %>% filter(!is.na(IMR))
-
-# Dados contrafactuais (1964–1985)
-dados_contra <- data.frame(
-  ano = 1964:1985,
-  IMR_central = as.numeric(imr_central),
-  IMR_min     = as.numeric(imr_min),
-  IMR_max     = as.numeric(imr_max)
-)
-
-# Combinar para ggplot
-p_imr <- ggplot() +
-  geom_ribbon(data = dados_contra,
-              aes(x = ano, ymin = IMR_min, ymax = IMR_max),
-              fill = "lightblue", alpha = 0.4) +
-  geom_line(data = dados_contra,
-            aes(x = ano, y = IMR_central, color = "Contrafactual"),
-            size = 1.2, linetype = "dashed") +
-  geom_line(data = dados_obs,
-            aes(x = ano, y = IMR, color = "Observado"),
-            size = 1) +
   geom_vline(xintercept = 1964, linetype = "dotted", color = "red", size = 1) +
-  annotate("text", x = 1964, y = max(dados_obs$IMR, na.rm = TRUE) * 0.9,
-           label = "Início do regime militar", color = "red", hjust = -0.1) +
-  scale_color_manual(name = "Série",
-                     values = c("Observado" = "black", "Contrafactual" = "blue")) +
-  labs(title = "Mortalidade infantil (IMR) – observada e contrafactual (log-linear)",
-       subtitle = "Projeção baseada na tendência 1944-1963",
-       x = "Ano", y = "IMR (óbitos por 1.000 nascidos vivos)") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-print(p_imr)
-ggsave("imr_obs_contra_loglinear.png", p_imr, width = 8, height = 5)
-
-# -----------------------------------------------------------------------------
-# 3. GRÁFICO DO EXCESSO ANUAL DE IMR (LOG-LINEAR)
-# -----------------------------------------------------------------------------
-
-# Usar a tabela já criada: tabela_imr_excesso
-p_excesso_imr <- ggplot(tabela_imr_excesso, aes(x = Ano, y = Excesso_Central)) +
-  geom_col(fill = ifelse(tabela_imr_excesso$Excesso_Central > 0, "red", "blue"), alpha = 0.6) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(title = "Excesso anual de mortalidade infantil (log-linear)",
-       subtitle = "Diferença entre IMR observada e projetada (1964–1985)",
-       x = "Ano", y = "Excesso de IMR (óbitos por 1.000 NV)") +
+  annotate("text", x = 1964, y = max(dados_its_e0$e0) * 0.9,
+           label = "1964 – Início do regime militar", color = "red", hjust = -0.1) +
+  labs(title = "Expectativa de vida – ITS com ARIMAX",
+       subtitle = "Ajuste do modelo com interrupção em 1964",
+       x = "Ano", y = "e₀ (anos)") +
+  scale_color_manual(values = c("Observado" = "black", "Ajustado (ARIMAX)" = "blue")) +
   theme_minimal()
 
-print(p_excesso_imr)
-ggsave("excesso_anual_imr_loglinear.png", p_excesso_imr, width = 8, height = 5)
-
-# -----------------------------------------------------------------------------
-# 4. GRÁFICO DE ÓBITOS OBSERVADOS E ESPERADOS (LOG-LINEAR)
-# -----------------------------------------------------------------------------
-
-# Dados do resultado_anual (já calculado)
-dat_plot <- resultado_anual %>%
-  dplyr::select(Ano, Observado, Esperado_Min, Esperado_Central, Esperado_Max) %>%
-  pivot_longer(-Ano, names_to = "Cenário", values_to = "Óbitos") %>%
-  mutate(`Óbitos (mil)` = `Óbitos` / 1000)
-
-p_obitos <- ggplot(dat_plot, aes(x = Ano, y = `Óbitos (mil)`, color = Cenário, linetype = Cenário)) +
-  geom_line(size = 1.2) +
-  scale_color_manual(values = c("Observado" = "black",
-                                "Esperado_Min" = "blue",
-                                "Esperado_Central" = "darkgreen",
-                                "Esperado_Max" = "red")) +
-  scale_linetype_manual(values = c("Observado" = "solid",
-                                   "Esperado_Min" = "dashed",
-                                   "Esperado_Central" = "dashed",
-                                   "Esperado_Max" = "dashed")) +
-  labs(title = "Óbitos anuais observados e contrafactuais (log-linear)",
-       subtitle = "Coorte-componente com projeção log-linear (tendência 1944-1963)",
-       y = "Óbitos (milhares)",
-       x = "Ano") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-print(p_obitos)
-ggsave("obitos_obs_esperados_loglinear.png", p_obitos, width = 8, height = 5)
-
-# -----------------------------------------------------------------------------
-# 5. GRÁFICO DO EXCESSO ANUAL DE ÓBITOS GERAIS (LOG-LINEAR)
-# -----------------------------------------------------------------------------
-
-# Extrair excesso anual do resultado_anual
-excesso_anual_geral <- resultado_anual %>%
-  dplyr::select(Ano, Excesso_Central) %>%
-  rename(Excesso = Excesso_Central)
-
-p_excesso_geral <- ggplot(excesso_anual_geral, aes(x = Ano, y = Excesso / 1000)) +
-  geom_col(fill = ifelse(excesso_anual_geral$Excesso > 0, "red", "blue"), alpha = 0.6) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  labs(title = "Excesso anual de mortalidade geral (log-linear)",
-       subtitle = "Diferença entre óbitos observados e esperados (1964–1985)",
-       x = "Ano", y = "Excesso (milhares de óbitos)") +
-  theme_minimal()
-
-print(p_excesso_geral)
-ggsave("excesso_anual_geral_loglinear.png", p_excesso_geral, width = 8, height = 5)
-
-# -----------------------------------------------------------------------------
-# 6. TABELA ANUAL DETALHADA (OBSERVADO, ESPERADO, EXCESSO) - LOG-LINEAR
-# -----------------------------------------------------------------------------
-
-# Usar resultado_anual
-tabela_anual_log <- resultado_anual %>%
-  dplyr::select(Ano, Observado, Esperado_Central, Excesso_Central) %>%
-  rename(Esperado = Esperado_Central, Excesso = Excesso_Central)
-
-# Exibir como tabela formatada (no console)
-cat("\n========== TABELA ANUAL (LOG-LINEAR) ==========\n")
-print(tabela_anual_log)
-
-# Salvar em CSV
-write.csv(tabela_anual_log, "tabela_anual_loglinear.csv", row.names = FALSE)
-
-# -----------------------------------------------------------------------------
-# 7. GRÁFICOS PARA O MÉTODO ARIMA (COMPARAÇÃO)
-# -----------------------------------------------------------------------------
-
-# Se existir resultado_anual_arimax, plotar
-if (exists("resultado_anual_arimax")) {
-  dat_plot_arimax <- resultado_anual_arimax %>%
-    dplyr::select(Ano, Observado, Esperado_Min, Esperado_Central, Esperado_Max) %>%
-    pivot_longer(-Ano, names_to = "Cenário", values_to = "Óbitos") %>%
-    mutate(`Óbitos (mil)` = `Óbitos` / 1000)
-  
-  p_arimax <- ggplot(dat_plot_arimax, aes(x = Ano, y = `Óbitos (mil)`, color = Cenário, linetype = Cenário)) +
-    geom_line(size = 1.2) +
-    scale_color_manual(values = c("Observado" = "black",
-                                  "Esperado_Min" = "blue",
-                                  "Esperado_Central" = "darkgreen",
-                                  "Esperado_Max" = "red")) +
-    scale_linetype_manual(values = c("Observado" = "solid",
-                                     "Esperado_Min" = "dashed",
-                                     "Esperado_Central" = "dashed",
-                                     "Esperado_Max" = "dashed")) +
-    labs(title = "Óbitos anuais observados e contrafactuais (ARIMA)",
-         subtitle = "Projeção ARIMA univariada da IMR (1944-1963)",
-         y = "Óbitos (milhares)",
-         x = "Ano") +
-    theme_minimal() +
-    theme(legend.position = "bottom")
-  
-  print(p_arimax)
-  ggsave("obitos_obs_esperados_arima.png", p_arimax, width = 8, height = 5)
-  
-  # Excesso anual ARIMA
-  excesso_anual_arima <- resultado_anual_arimax %>%
-    dplyr::select(Ano, Excesso_Central) %>%
-    rename(Excesso = Excesso_Central)
-  
-  p_excesso_arima <- ggplot(excesso_anual_arima, aes(x = Ano, y = Excesso / 1000)) +
-    geom_col(fill = ifelse(excesso_anual_arima$Excesso > 0, "red", "blue"), alpha = 0.6) +
-    geom_hline(yintercept = 0, linetype = "dashed") +
-    labs(title = "Excesso anual de mortalidade geral (ARIMA)",
-         subtitle = "Diferença entre óbitos observados e esperados (1964–1985)",
-         x = "Ano", y = "Excesso (milhares de óbitos)") +
-    theme_minimal()
-  
-  print(p_excesso_arima)
-  ggsave("excesso_anual_geral_arima.png", p_excesso_arima, width = 8, height = 5)
-}
-
-# -----------------------------------------------------------------------------
-# 8. COMPARAÇÃO ENTRE MÉTODOS (LOG-LINEAR vs ARIMA) – GRÁFICO DE BARRAS
-# -----------------------------------------------------------------------------
-
-# Juntar os resultados centrais de ambos os métodos
-comparacao <- data.frame(
-  Metodo = c("Log-linear", "ARIMA"),
-  Excesso_infantil = c(excesso_infantil_abs_central,
-                       if (exists("excesso_infantil_abs_arima")) excesso_infantil_abs_arima else NA),
-  Excesso_geral = c(excesso_central$total,
-                    if (exists("excesso_total_obitos")) excesso_total_obitos else NA)
-)
-
-# Exibir tabela
-cat("\n========== COMPARAÇÃO ENTRE MÉTODOS ==========\n")
-print(comparacao)
-
-# Gráfico de barras comparativo (excesso geral)
-comparacao_long <- comparacao %>%
-  pivot_longer(-Metodo, names_to = "Tipo", values_to = "Excesso") %>%
-  filter(!is.na(Excesso))
-
-p_comparacao <- ggplot(comparacao_long, aes(x = Metodo, y = Excesso / 1e6, fill = Tipo)) +
-  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
-  geom_text(aes(label = round(Excesso / 1e6, 1)), 
-            position = position_dodge(width = 0.9), vjust = -0.3) +
-  labs(title = "Comparação do excesso total entre métodos",
-       x = "Método", y = "Excesso (milhões de óbitos)",
-       fill = "Tipo de excesso") +
-  theme_minimal()
-
-print(p_comparacao)
-ggsave("comparacao_metodos.png", p_comparacao, width = 6, height = 5)
-
-# -----------------------------------------------------------------------------
-# 9. GRÁFICO DA SÉRIE DA IMR COM PROJEÇÃO ARIMA (SE DISPONÍVEL)
-# -----------------------------------------------------------------------------
-
-if (exists("projecao") && exists("imr_projetado")) {
-  # Dados históricos e observados
-  dados_hist <- data.frame(
-    ano = 1944:1963,
-    IMR = imr_interp[15:34]  # ajuste conforme necessidade
-  )
-  dados_obs_arima <- data.frame(
-    ano = 1964:1985,
-    IMR = imr_observado
-  )
-  dados_proj_arima <- data.frame(
-    ano = 1964:1985,
-    IMR = imr_projetado,
-    inf = imr_projetado_inf,
-    sup = imr_projetado_sup
-  )
-  
-  p_arima_imr <- ggplot() +
-    geom_line(data = dados_hist, aes(x = ano, y = IMR, color = "Histórico"), size = 1) +
-    geom_line(data = dados_obs_arima, aes(x = ano, y = IMR, color = "Observado"), size = 1) +
-    geom_ribbon(data = dados_proj_arima,
-                aes(x = ano, ymin = inf, ymax = sup),
-                fill = "lightblue", alpha = 0.4) +
-    geom_line(data = dados_proj_arima,
-              aes(x = ano, y = IMR, color = "Projetado (ARIMA)"),
-              size = 1, linetype = "dashed") +
-    geom_vline(xintercept = 1964, linetype = "dotted", color = "red") +
-    annotate("text", x = 1964, y = max(dados_hist$IMR) * 0.9,
-             label = "Início do regime", color = "red", hjust = -0.1) +
-    scale_color_manual(values = c("Histórico" = "black",
-                                  "Observado" = "darkgreen",
-                                  "Projetado (ARIMA)" = "blue")) +
-    labs(title = "Mortalidade infantil – ARIMA pré-1964",
-         subtitle = "Projeção baseada na tendência 1944-1963",
-         x = "Ano", y = "IMR (óbitos por 1.000 NV)") +
-    theme_minimal() +
-    theme(legend.position = "bottom")
-  
-  print(p_arima_imr)
-  ggsave("imr_arima_obs_contra.png", p_arima_imr, width = 8, height = 5)
-}
-
-# -----------------------------------------------------------------------------
-# 10. SALVAR TODOS OS GRÁFICOS EM UM ÚNICO PDF
-# -----------------------------------------------------------------------------
-
-pdf("analise_principal_graficos_completos.pdf", width = 10, height = 7)
-
-print(p_imr)
-print(p_excesso_imr)
-print(p_obitos)
-print(p_excesso_geral)
-if (exists("p_arimax")) print(p_arimax)
-if (exists("p_excesso_arima")) print(p_excesso_arima)
-if (exists("p_arima_imr")) print(p_arima_imr)
-print(p_comparacao)
-
-dev.off()
-cat("\nTodos os gráficos principais foram salvos em 'analise_principal_graficos_completos.pdf'\n")
-
-# -----------------------------------------------------------------------------
-# FIM DA VISUALIZAÇÃO
-# -----------------------------------------------------------------------------
-
-
-# =============================================================================
-# ANÁLISE DE SENSIBILIDADE – EXCESSO DE MORTALIDADE NO REGIME MILITAR (1964-1985)
-# =============================================================================
-# Parâmetros variados:
-#   - Método de interpolação da IMR: "fmm" ou "natural"
-#   - Início do período de treino: 1940, 1944, 1949
-#   - Fim do período de treino: 1960, 1963
-#   - Multiplicador da correção migratória: 1,0, 1,5, 2,0
-# =============================================================================
-
-corrigir_censo_var <- function(df_ano, ano, 
-                               omissao_liquida = NULL,   # se NULL, usa a tabela fixa
-                               p_men_var = p_men, 
-                               p_women_var = p_women) {
-  # Se não fornecida, usa a taxa da tabela global
-  if (is.null(omissao_liquida)) {
-    omissao_ano <- omissao$omissao_liquida[omissao$ano == ano]
-  } else {
-    omissao_ano <- omissao_liquida
-  }
-  if (length(omissao_ano) == 0) stop("Ano sem taxa de omissão")
-  
-  C_total <- 1 / (1 - omissao_ano)
-  
-  col_homens <- paste0("homens ", age_groups)
-  col_mulheres <- paste0("mulheres ", age_groups)
-  
-  pop_homens <- as.numeric(df_ano[col_homens])
-  pop_mulheres <- as.numeric(df_ano[col_mulheres])
-  
-  f0_homens <- 1 / (1 - p_men_var)
-  f0_mulheres <- 1 / (1 - p_women_var)
-  
-  pop_corr_homens <- pop_homens * f0_homens
-  pop_corr_mulheres <- pop_mulheres * f0_mulheres
-  
-  total_bruto <- sum(pop_homens) + sum(pop_mulheres)
-  total_corr_prelim <- sum(pop_corr_homens) + sum(pop_corr_mulheres)
-  
-  s <- (total_bruto * C_total) / total_corr_prelim
-  
-  f_homens <- f0_homens * s
-  f_mulheres <- f0_mulheres * s
-  
-  df_ano[col_homens] <- as.list(pop_homens * f_homens)
-  df_ano[col_mulheres] <- as.list(pop_mulher
+# 8. (Opcional) Converter o efeito acumulado em óbitos equivalentes
+#    O efeito acumulado é em anos de ganho/perda de e0.
+#    Multiplicamos pela população total do regime e dividimos pela e0 média.
+#    Isso dá uma estimativa do número de mortes que corresponderia à perda de anos.
+perda_anos_acumulada <- -efeito_acumulado_e0  # se negativo, perda
