@@ -323,6 +323,10 @@ periodos <- list(
   "1980-1991" = c(1980,1991)
 )
 
+mortalidade_interp <- spline(df_raw$ano, df_raw$taxa_bruta_mortalidade, method = "natural")$y
+
+plot(mortalidade_interp)
+
 resultados <- data.frame(periodo = character(),
                          pop_inicio = numeric(), pop_fim = numeric(),
                          nasc = numeric(), migracao = numeric(),
@@ -354,29 +358,52 @@ cat("Óbitos reconstruídos por década:\n")
 print(resultados %>% mutate(across(where(is.numeric), ~ round(., 0))))
 
 # =============================================================================
-# 5. ANUALIZAÇÃO DOS ÓBITOS (USANDO IMR) – CORRIGIDO
+# 5. ÓBITOS ANUAIS A PARTIR DA TAXA BRUTA DE MORTALIDADE (CDR) DIRETA
 # =============================================================================
 
-obitos_anuais <- numeric(length(all_years))
+# Extrair CDR observada (anos com dados)
+cdr_raw <- df_raw %>%
+  dplyr::select(ano, taxa_bruta_mortalidade) %>%
+  filter(!is.na(taxa_bruta_mortalidade)) %>%
+  arrange(ano)
 
-for (i in 1:nrow(resultados)) {
-  t0 <- periodos[[resultados$periodo[i]]][1]
-  t1 <- periodos[[resultados$periodo[i]]][2]
-  anos <- t0:(t1 - 1)
-  
-  # IMR para cada ano do período
-  imr_periodo <- imr_interp[imr_years_all %in% anos]
-  
-  # Se a soma das IMR for zero (improvável), distribuir uniformemente
-  if (sum(imr_periodo) == 0) {
-    pesos <- rep(1/length(anos), length(anos))
-  } else {
-    pesos <- imr_periodo / sum(imr_periodo)
-  }
-  
-  # Atribuir óbitos anuais
-  obitos_anuais[all_years %in% anos] <- resultados$obitos[i] * pesos
-}
+# Verificar cobertura
+print(range(cdr_raw$ano))  # deve incluir 1930-2022, mas com alguns anos faltando?
+
+# Interpolação spline cúbica natural para todos os anos de interesse (1930-1991)
+cdr_interp <- spline(
+  x = cdr_raw$ano,
+  y = cdr_raw$taxa_bruta_mortalidade,
+  xout = all_years,
+  method = "natural"
+)$y
+
+# Calcular óbitos anuais (CDR é por 1000 habitantes)
+# pop_total já está em número de pessoas
+obitos_anuais_cdr <- (cdr_interp / 1000) * pop_total
+
+# ----------------------------------------------------------------------------
+# COMPARAÇÃO COM OS ÓBITOS RECONSTRUÍDOS (MÉTODO ANTERIOR)
+# ----------------------------------------------------------------------------
+
+# Para comparar, primeiro precisamos dos óbitos do método anterior.
+# Eles já foram calculados na seção 5 original (obitos_anuais).
+# Se você ainda não executou a antiga seção 5, pode mantê-la como "obitos_reconstruidos".
+# Vamos supor que você quer comparar:
+
+
+# ----------------------------------------------------------------------------
+# DECISÃO: USAR QUAL SÉRIE?
+# ----------------------------------------------------------------------------
+# Se a diferença for pequena (ex.: < 5%), pode usar a CDR direta como principal,
+# pois é mais simples e evita erros de migração/nascimentos.
+# Caso contrário, investigue a origem da discrepância.
+
+# Para prosseguir, vou adotar a série da CDR direta como a oficial,
+# mas você pode manter a reconstruída se preferir.
+# Substitua 'obitos_anuais' pela nova série:
+
+obitos_anuais <- obitos_anuais_cdr
 
 # Taxa bruta de mortalidade observada
 CDR_obs <- obitos_anuais / pop_total
@@ -385,6 +412,9 @@ CDR_obs <- obitos_anuais / pop_total
 if (any(is.na(obitos_anuais[1:30]))) {
   warning("obitos_anuais contém NAs nos primeiros anos. Verifique a conversão dos dados.")
 }
+
+
+
 # =============================================================================
 # 6. RELAÇÃO CDR ~ IMR + PROP_IDOSOS (PERÍODO PRÉ-1964) – CORRIGIDO
 # =============================================================================
@@ -406,11 +436,15 @@ colnames(xreg_pre) <- c("log(IMR)", "log(prop_idosos)")
 # Ajustar ARIMA
 modelo_cdr_imr_idosos <- auto.arima(
   log(dados_pre$CDR),
-  xreg = xreg_pre
+  xreg = xreg_pre,
+  stepwise = FALSE,
+  approximation = FALSE
 )
 
 summary(modelo_cdr_imr_idosos)
 coeftest(modelo_cdr_imr_idosos)
+
+
 
 
 # =============================================================================
@@ -427,7 +461,7 @@ imr_hist <- data.frame(
 
 # 1. Ajuste do modelo segmentado (1 breakpoint)
 modelo_seg <- lm(log(IMR) ~ ano, data = imr_hist)
-seg_fit <- segmented(modelo_seg, seg.Z = ~ano, npsi = 2)
+seg_fit <- segmented(modelo_seg, seg.Z = ~ano, npsi = 1)
 
 # Exibir o breakpoint estimado (já rodou, mas mantemos para referência)
 print(summary(seg_fit))
@@ -644,40 +678,7 @@ ggplot(tabela_imr_excesso, aes(x = Ano, y = Excesso_Central)) +
 ind_regime <- all_years %in% anos_regime
 pop_regime <- pop_total[ind_regime]
 
-# Óbitos observados (já suavizados ou brutos – você usou brutos)
-
-
-obitos_regime_bruto <- obitos_anuais[ind_regime]
-
-# SUAVIZAÇÃO DE obitos_regime COM LOESS
-
-# 1. Criar um data.frame com os dados
-dados_obitos <- data.frame(
-  ano = anos_regime,
-  obitos = obitos_regime_bruto
-)
-
-# 2. Ajustar LOESS (span = 0.75 é um valor razoável; ajuste conforme necessário)
-span <- 0.75
-loess_fit <- loess(obitos ~ ano, data = dados_obitos, span = span, degree = 1)
-
-# 3. Obter valores suavizados (fitted) e, se desejar, intervalo de confiança
-dados_obitos$obitos_suav <- predict(loess_fit, se = TRUE)$fit
-dados_obitos$se <- predict(loess_fit, se = TRUE)$se.fit
-
-# 4. Visualizar a suavização (opcional)
-ggplot(dados_obitos, aes(x = ano)) +
-  geom_line(aes(y = obitos, color = "Observado"), size = 0.8) +
-  geom_line(aes(y = obitos_suav, color = "Suavizado (LOESS)"), size = 1.2) +
-  geom_ribbon(aes(ymin = obitos_suav - 1.96*se, ymax = obitos_suav + 1.96*se),
-              alpha = 0.2, fill = "blue") +
-  labs(title = "Suavização LOESS dos óbitos observados (1964-1985)",
-       y = "Óbitos", x = "Ano") +
-  scale_color_manual(values = c("Observado" = "black", "Suavizado (LOESS)" = "red")) +
-  theme_minimal()
-
-
-obitos_regime <- dados_obitos$obitos_suav
+obitos_regime <- obitos_anuais[ind_regime]
 
 calcular_excesso <- function(imr_contra, prop_contra) {
   xreg_contra <- cbind(log(imr_contra), log(prop_contra))
@@ -692,9 +693,9 @@ calcular_excesso <- function(imr_contra, prop_contra) {
 
 
 # Calcular cenários
-excesso_max <- calcular_excesso(imr_max, prop_contra)
+excesso_max <- calcular_excesso(imr_min, prop_contra)
 excesso_central <- calcular_excesso(imr_central, prop_contra)
-excesso_min <- calcular_excesso(imr_min, prop_contra)
+excesso_min <- calcular_excesso(imr_max, prop_contra)
 
 # ----------------------------------------------------------------------------
 # 7.5 RESULTADOS
@@ -802,7 +803,10 @@ xreg <- cbind(
 )
 
 # Ajustar ARIMA com regressores (ARIMAX) – seleção automática
-modelo_arimax <- auto.arima(serie_ts, xreg = xreg, stepwise = FALSE, approximation = FALSE)
+modelo_arimax <- auto.arima(serie_ts, 
+                            xreg = xreg, 
+                            stepwise = FALSE, 
+                            approximation = FALSE)
 
 # Resumo do modelo
 summary(modelo_arimax)
@@ -956,91 +960,6 @@ print(its_excess)
 
 ggsave("ITS_excess_plot.png", plot = its_excess)
 
-# =============================================================================
-# VALIDAÇÃO EXTERNA: EXPECTATIVA DE VIDA CONTRAFACTUAL (SPLINE)
-# =============================================================================
-
-library(splines)
-
-# 1. Dados históricos (período 1944-1963)
-anos_pre_e0 <- 1940:1963
-ind_pre_e0 <- life_expec_years_all %in% anos_pre_e0
-e0_hist <- data.frame(
-  ano = anos_pre_e0,
-  e0 = life_expec_interp[ind_pre_e0]
-)
-
-# 2. Ajustar modelo com spline (3 graus de liberdade)
-#    Usamos log(e0) para estabilizar a variância, mas podemos tentar e0 diretamente.
-modelo_e0_spline <- lm(log(e0) ~ ns(ano, df = 3), data = e0_hist)
-summary(modelo_e0_spline)
-
-# Verificar resíduos
-par(mfrow = c(2,2))
-plot(modelo_e0_spline)
-
-# 3. Projetar e0 contrafactual para 1964-1985
-anos_regime <- 1964:1985
-newdata <- data.frame(ano = anos_regime)
-e0_contra <- exp(predict(modelo_e0_spline, newdata))
-
-# 4. e0 observada
-ind_obs_e0 <- which(life_expec_years_all %in% anos_regime)
-e0_obs <- life_expec_interp[ind_obs_e0]
-
-# 5. Diferença: observado - contrafactual (negativo = perda)
-diferenca_e0 <- e0_obs - e0_contra
-
-# 6. Perda absoluta em pessoa-anos (apenas quando a diferença é negativa)
-#    Em geral, a diferença será negativa em todos os anos; mas usamos pmax para segurança.
-perda_pessoa_anos <- sum(pmax(-diferenca_e0, 0) * pop_total[all_years %in% anos_regime])
-
-# 7. Óbitos equivalentes: perda dividida pela expectativa de vida média no período
-#    Usamos a média da e0 observada no regime como proxy da idade média ao morrer.
-media_e0_regime <- mean(e0_contra)
-obitos_equivalentes <- perda_pessoa_anos / media_e0_regime
-
-# 8. Resultados
-cat("\n========== VALIDAÇÃO EXTERNA (SPLINE) ==========\n")
-cat(sprintf("Perda acumulada de expectativa de vida: %0.2f anos\n", -sum(diferenca_e0)))
-
-# 9. Comparação com o excesso central
-cat("\n--- Comparação com o excesso estimado pelo modelo CDR~IMR ---\n")
-cat(sprintf("Excesso de mortalidade (central) do modelo principal: %0.0f óbitos\n", 
-            excesso_central$total))
-cat(sprintf("Razão (validação / modelo principal): %0.2f\n", 
-            obitos_equivalentes / excesso_central$total))
-
-# 11. Gráfico da diferença anual (observado - contrafactual)
-df_e0 <- data.frame(
-  ano = anos_regime,
-  e0_obs = e0_obs,
-  e0_contra = e0_contra,
-  diferenca = diferenca_e0
-)
-
-ggplot(df_e0, aes(x = ano)) +
-  geom_line(aes(y = e0_obs, color = "Observado"), size = 1) +
-  geom_line(aes(y = e0_contra, color = "Contrafactual"), linetype = "dashed", size = 1) +
-  labs(title = "Expectativa de vida ao nascer – observada vs. contrafactual",
-       subtitle = "Projeção log-linear com base na tendência 1944-1963",
-       y = "e₀ (anos)", x = "Ano") +
-  scale_color_manual(values = c("Observado" = "black", "Contrafactual" = "red")) +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
-# 12. Gráfico da diferença anual (excesso/perda de e₀)
-ggplot(df_e0, aes(x = ano, y = diferenca)) +
-  geom_col(aes(fill = diferenca < 0), alpha = 0.7) +
-  geom_hline(yintercept = 0, linetype = "dashed") +
-  scale_fill_manual(values = c("TRUE" = "red", "FALSE" = "blue"), 
-                    labels = c("Ganho", "Perda")) +
-  labs(title = "Diferença anual na expectativa de vida (observado - contrafactual)",
-       subtitle = "Valores negativos indicam perda de anos de vida",
-       y = "Diferença em anos", x = "Ano") +
-  theme_minimal() +
-  theme(legend.position = "bottom")
-
 
 # =============================================================================
 # ESTUDO DE SÉRIE TEMPORAL INTERROMPIDA (ITS) – EXPECTATIVA DE VIDA
@@ -1099,8 +1018,10 @@ xreg_e0 <- cbind(
   tempo_pos = dados_its_e0$tempo_pos
 )
 
-modelo_arimax_e0 <- auto.arima(serie_e0_ts, xreg = xreg_e0, 
-                               stepwise = FALSE, approximation = FALSE)
+modelo_arimax_e0 <- auto.arima(serie_e0_ts,
+                               xreg = xreg_e0, 
+                               stepwise = FALSE, 
+                               approximation = FALSE)
 summary(modelo_arimax_e0)
 coeftest(modelo_arimax_e0)
 
